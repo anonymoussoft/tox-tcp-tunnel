@@ -61,6 +61,7 @@ add_library(toxtunnel_lib STATIC)
 target_sources(toxtunnel_lib PRIVATE
     src/placeholder.cpp
     src/util/error.cpp
+    src/util/logger.cpp
 )
 target_include_directories(toxtunnel_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
