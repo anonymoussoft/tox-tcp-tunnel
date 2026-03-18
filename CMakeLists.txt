@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.14)
 project(toxtunnel VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -12,15 +12,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(TOXTUNNEL_BUILD_TESTS "Build tests" ON)
 option(TOXTUNNEL_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 
-# Compiler flags
-if(MSVC)
-    add_compile_options(/W4 /WX)
-else()
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
-    if(TOXTUNNEL_ENABLE_ASAN)
-        add_compile_options(-fsanitize=address,undefined -g)
-        add_link_options(-fsanitize=address,undefined)
-    endif()
+# Sanitizer flags (applied globally since they affect linking too)
+if(NOT MSVC AND TOXTUNNEL_ENABLE_ASAN)
+    add_compile_options(-fsanitize=address,undefined -g)
+    add_link_options(-fsanitize=address,undefined)
 endif()
 
 # Dependencies
@@ -64,11 +59,15 @@ FetchContent_MakeAvailable(yaml-cpp)
 # Library target
 add_library(toxtunnel_lib STATIC)
 target_sources(toxtunnel_lib PRIVATE
-    # Will be populated as we add files
+    src/placeholder.cpp
 )
 target_include_directories(toxtunnel_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${asio_SOURCE_DIR}/asio/include
+    ${TOXCORE_INCLUDE_DIRS}
+)
+target_link_directories(toxtunnel_lib PUBLIC
+    ${TOXCORE_LIBRARY_DIRS}
 )
 target_link_libraries(toxtunnel_lib PUBLIC
     ${TOXCORE_LIBRARIES}
@@ -79,10 +78,21 @@ target_compile_definitions(toxtunnel_lib PUBLIC
     ASIO_STANDALONE
     ASIO_NO_DEPRECATED
 )
+# Apply strict warnings only to our own library target
+if(MSVC)
+    target_compile_options(toxtunnel_lib PRIVATE /W4 /WX)
+else()
+    target_compile_options(toxtunnel_lib PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
 
 # Executable target
 add_executable(toxtunnel cli/main.cpp)
 target_link_libraries(toxtunnel PRIVATE toxtunnel_lib CLI11::CLI11)
+if(MSVC)
+    target_compile_options(toxtunnel PRIVATE /W4 /WX)
+else()
+    target_compile_options(toxtunnel PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
 
 # Tests
 if(TOXTUNNEL_BUILD_TESTS)
