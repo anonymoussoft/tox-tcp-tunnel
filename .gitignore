@@ -1,0 +1,26 @@
+# Build directories
+build/
+cmake-build-*/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled files
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Test artifacts
+Testing/
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
