@@ -14,6 +14,8 @@ include(GoogleTest)
 add_executable(unit_tests
     unit/placeholder_test.cpp
     unit/test_expected.cpp
+    unit/test_circular_buffer.cpp
+    unit/test_config.cpp
 )
 target_link_libraries(unit_tests PRIVATE
     toxtunnel_lib

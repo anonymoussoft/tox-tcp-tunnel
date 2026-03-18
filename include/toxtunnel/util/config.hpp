@@ -1,0 +1,256 @@
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <yaml-cpp/yaml.h>
+
+#include "toxtunnel/tox/types.hpp"
+#include "toxtunnel/util/expected.hpp"
+#include "toxtunnel/util/logger.hpp"
+
+namespace toxtunnel {
+
+// ---------------------------------------------------------------------------
+// Configuration structures
+// ---------------------------------------------------------------------------
+
+/// Represents a port forwarding rule for client mode.
+struct ForwardRule {
+    uint16_t local_port = 0;      ///< Local port to listen on
+    std::string remote_host;      ///< Remote host to connect to (via tunnel)
+    uint16_t remote_port = 0;     ///< Remote port to connect to
+
+    bool operator==(const ForwardRule& other) const {
+        return local_port == other.local_port &&
+               remote_host == other.remote_host &&
+               remote_port == other.remote_port;
+    }
+};
+
+/// Represents a DHT bootstrap node configuration (YAML-friendly).
+struct BootstrapNodeConfig {
+    std::string address;          ///< Hostname or IP address
+    uint16_t port = 33445;        ///< UDP port (default: 33445)
+    std::string public_key;       ///< Hex-encoded public key (64 chars)
+
+    /// Convert to a BootstrapNode (parses public key).
+    /// Returns error string if public key is invalid.
+    [[nodiscard]] util::Expected<tox::BootstrapNode, std::string> to_bootstrap_node() const;
+
+    bool operator==(const BootstrapNodeConfig& other) const {
+        return address == other.address &&
+               port == other.port &&
+               public_key == other.public_key;
+    }
+};
+
+/// Logging configuration.
+struct LoggingConfig {
+    util::LogLevel level = util::LogLevel::Info;     ///< Minimum log level
+    std::optional<std::string> file;     ///< Optional log file path
+
+    bool operator==(const LoggingConfig& other) const {
+        return level == other.level && file == other.file;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Mode-specific configuration
+// ---------------------------------------------------------------------------
+
+/// Server-specific configuration options.
+struct ServerConfig {
+    uint16_t tcp_port = 33445;                    ///< TCP relay port
+    bool udp_enabled = true;                      ///< Enable UDP for DHT
+    std::vector<BootstrapNodeConfig> bootstrap_nodes;  ///< DHT bootstrap nodes
+    std::optional<std::string> rules_file;        ///< Optional access rules file
+
+    bool operator==(const ServerConfig& other) const {
+        return tcp_port == other.tcp_port &&
+               udp_enabled == other.udp_enabled &&
+               bootstrap_nodes == other.bootstrap_nodes &&
+               rules_file == other.rules_file;
+    }
+};
+
+/// Client-specific configuration options.
+struct ClientConfig {
+    std::string server_id;                    ///< Server's Tox ID (76 hex chars)
+    std::vector<ForwardRule> forwards;        ///< Port forwarding rules
+
+    bool operator==(const ClientConfig& other) const {
+        return server_id == other.server_id && forwards == other.forwards;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Main configuration
+// ---------------------------------------------------------------------------
+
+/// Operating mode of the application.
+enum class Mode {
+    Server,  ///< Act as a tunnel server
+    Client,  ///< Act as a tunnel client
+};
+
+/// Main configuration structure containing all options.
+struct Config {
+    // Common options
+    Mode mode = Mode::Server;
+    std::filesystem::path data_dir;           ///< Directory for Tox save data
+    LoggingConfig logging;
+
+    // Mode-specific options
+    std::optional<ServerConfig> server;
+    std::optional<ClientConfig> client;
+
+    // -----------------------------------------------------------------------
+    // Factory methods
+    // -----------------------------------------------------------------------
+
+    /// Load configuration from a YAML file.
+    /// Returns the Config on success, or an error description string.
+    [[nodiscard]] static util::Expected<Config, std::string> from_file(
+        const std::filesystem::path& filepath);
+
+    /// Load configuration from a YAML string.
+    /// Useful for testing or loading from command-line argument.
+    [[nodiscard]] static util::Expected<Config, std::string> from_string(
+        std::string_view yaml_content);
+
+    /// Create default server configuration.
+    [[nodiscard]] static Config default_server();
+
+    /// Create default client configuration.
+    [[nodiscard]] static Config default_client();
+
+    // -----------------------------------------------------------------------
+    // Operations
+    // -----------------------------------------------------------------------
+
+    /// Validate the configuration.
+    /// Returns success or an error description.
+    [[nodiscard]] util::Expected<void, std::string> validate() const;
+
+    /// Merge CLI overrides into this configuration.
+    /// Non-empty / non-nullopt values in @p overrides replace existing values.
+    void merge_cli_overrides(const Config& overrides);
+
+    /// Serialize configuration to YAML.
+    [[nodiscard]] std::string to_yaml() const;
+
+    /// Save configuration to a YAML file.
+    [[nodiscard]] util::Expected<void, std::string> save(
+        const std::filesystem::path& filepath) const;
+
+    // -----------------------------------------------------------------------
+    // Accessors
+    // -----------------------------------------------------------------------
+
+    /// Check if running in server mode.
+    [[nodiscard]] bool is_server() const { return mode == Mode::Server; }
+
+    /// Check if running in client mode.
+    [[nodiscard]] bool is_client() const { return mode == Mode::Client; }
+
+    /// Get server configuration (throws if not in server mode).
+    [[nodiscard]] const ServerConfig& server_config() const;
+
+    /// Get client configuration (throws if not in client mode).
+    [[nodiscard]] const ClientConfig& client_config() const;
+
+    bool operator==(const Config& other) const {
+        return mode == other.mode &&
+               data_dir == other.data_dir &&
+               logging == other.logging &&
+               server == other.server &&
+               client == other.client;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// ConfigError enum for std::error_code integration
+// ---------------------------------------------------------------------------
+
+enum class ConfigError {
+    FileNotFound = 1,
+    ParseError,
+    ValidationError,
+    InvalidMode,
+    InvalidPort,
+    InvalidToxId,
+    InvalidPublicKey,
+    MissingRequired,
+};
+
+/// Returns the singleton error_category for ConfigError codes.
+const std::error_category& config_error_category() noexcept;
+
+/// make_error_code overload for ConfigError (found via ADL).
+std::error_code make_error_code(ConfigError e) noexcept;
+
+}  // namespace toxtunnel
+
+// Enable implicit conversion to std::error_code
+template <>
+struct std::is_error_code_enum<toxtunnel::ConfigError> : std::true_type {};
+
+// ---------------------------------------------------------------------------
+// YAML-CPP encoding specializations
+// ---------------------------------------------------------------------------
+
+namespace YAML {
+
+template <>
+struct convert<toxtunnel::ForwardRule> {
+    static Node encode(const toxtunnel::ForwardRule& rhs);
+    static bool decode(const Node& node, toxtunnel::ForwardRule& rhs);
+};
+
+template <>
+struct convert<toxtunnel::BootstrapNodeConfig> {
+    static Node encode(const toxtunnel::BootstrapNodeConfig& rhs);
+    static bool decode(const Node& node, toxtunnel::BootstrapNodeConfig& rhs);
+};
+
+template <>
+struct convert<toxtunnel::LoggingConfig> {
+    static Node encode(const toxtunnel::LoggingConfig& rhs);
+    static bool decode(const Node& node, toxtunnel::LoggingConfig& rhs);
+};
+
+template <>
+struct convert<toxtunnel::ServerConfig> {
+    static Node encode(const toxtunnel::ServerConfig& rhs);
+    static bool decode(const Node& node, toxtunnel::ServerConfig& rhs);
+};
+
+template <>
+struct convert<toxtunnel::ClientConfig> {
+    static Node encode(const toxtunnel::ClientConfig& rhs);
+    static bool decode(const Node& node, toxtunnel::ClientConfig& rhs);
+};
+
+template <>
+struct convert<toxtunnel::Mode> {
+    static Node encode(const toxtunnel::Mode& rhs);
+    static bool decode(const Node& node, toxtunnel::Mode& rhs);
+};
+
+template <>
+struct convert<toxtunnel::util::LogLevel> {
+    static Node encode(const toxtunnel::util::LogLevel& rhs);
+    static bool decode(const Node& node, toxtunnel::util::LogLevel& rhs);
+};
+
+template <>
+struct convert<toxtunnel::Config> {
+    static Node encode(const toxtunnel::Config& rhs);
+    static bool decode(const Node& node, toxtunnel::Config& rhs);
+};
+
+}  // namespace YAML

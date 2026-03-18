@@ -60,6 +60,16 @@ FetchContent_MakeAvailable(yaml-cpp)
 add_library(toxtunnel_lib STATIC)
 target_sources(toxtunnel_lib PRIVATE
     src/placeholder.cpp
+    src/core/io_context.cpp
+    src/core/tcp_connection.cpp
+    src/core/tcp_listener.cpp
+    src/tunnel/protocol.cpp
+    src/tox/types.cpp
+    src/tox/tox_save.cpp
+    src/tox/tox_thread.cpp
+    src/tox/tox_connection.cpp
+    src/tox/tox_adapter.cpp
+    src/util/config.cpp
     src/util/error.cpp
     src/util/logger.cpp
 )

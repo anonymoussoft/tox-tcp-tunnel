@@ -1,0 +1,712 @@
+#include "toxtunnel/util/config.hpp"
+
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+
+namespace toxtunnel {
+
+// ---------------------------------------------------------------------------
+// ConfigError category
+// ---------------------------------------------------------------------------
+
+namespace {
+
+class ConfigErrorCategory : public std::error_category {
+public:
+    const char* name() const noexcept override { return "config"; }
+
+    std::string message(int ev) const override {
+        switch (static_cast<ConfigError>(ev)) {
+            case ConfigError::FileNotFound:
+                return "Configuration file not found";
+            case ConfigError::ParseError:
+                return "Failed to parse configuration file";
+            case ConfigError::ValidationError:
+                return "Configuration validation failed";
+            case ConfigError::InvalidMode:
+                return "Invalid operating mode";
+            case ConfigError::InvalidPort:
+                return "Invalid port number";
+            case ConfigError::InvalidToxId:
+                return "Invalid Tox ID";
+            case ConfigError::InvalidPublicKey:
+                return "Invalid public key";
+            case ConfigError::MissingRequired:
+                return "Missing required configuration field";
+            default:
+                return "Unknown configuration error";
+        }
+    }
+};
+
+const ConfigErrorCategory g_config_error_category{};
+
+}  // namespace
+
+const std::error_category& config_error_category() noexcept {
+    return g_config_error_category;
+}
+
+std::error_code make_error_code(ConfigError e) noexcept {
+    return {static_cast<int>(e), config_error_category()};
+}
+
+// ---------------------------------------------------------------------------
+// BootstrapNodeConfig
+// ---------------------------------------------------------------------------
+
+util::Expected<tox::BootstrapNode, std::string> BootstrapNodeConfig::to_bootstrap_node() const {
+    tox::BootstrapNode node;
+    node.ip = address;
+    node.port = port;
+
+    auto pk_result = tox::parse_public_key(public_key);
+    if (!pk_result) {
+        return util::make_unexpected(std::string("Invalid public key: ") + pk_result.error());
+    }
+    node.public_key = pk_result.value();
+
+    return node;
+}
+
+// ---------------------------------------------------------------------------
+// Config factory methods
+// ---------------------------------------------------------------------------
+
+util::Expected<Config, std::string> Config::from_file(const std::filesystem::path& filepath) {
+    if (!std::filesystem::exists(filepath)) {
+        return util::make_unexpected(
+            std::string("Configuration file not found: ") + filepath.string());
+    }
+
+    try {
+        YAML::Node node = YAML::LoadFile(filepath.string());
+        return node.as<Config>();
+    } catch (const YAML::Exception& e) {
+        return util::make_unexpected(
+            std::string("Failed to parse configuration: ") + e.what());
+    }
+}
+
+util::Expected<Config, std::string> Config::from_string(std::string_view yaml_content) {
+    try {
+        YAML::Node node = YAML::Load(std::string(yaml_content));
+        return node.as<Config>();
+    } catch (const YAML::Exception& e) {
+        return util::make_unexpected(
+            std::string("Failed to parse configuration: ") + e.what());
+    }
+}
+
+Config Config::default_server() {
+    Config config;
+    config.mode = Mode::Server;
+    config.data_dir = "/var/lib/toxtunnel";
+    config.server = ServerConfig{};
+    return config;
+}
+
+Config Config::default_client() {
+    Config config;
+    config.mode = Mode::Client;
+    config.data_dir = std::filesystem::path(getenv("HOME") ? getenv("HOME") : ".") / ".config" / "toxtunnel";
+    config.client = ClientConfig{};
+    return config;
+}
+
+// ---------------------------------------------------------------------------
+// Config validation
+// ---------------------------------------------------------------------------
+
+util::Expected<void, std::string> Config::validate() const {
+    // Validate mode
+    if (mode != Mode::Server && mode != Mode::Client) {
+        return util::make_unexpected(std::string("Invalid mode"));
+    }
+
+    // Validate mode-specific configuration
+    if (mode == Mode::Server) {
+        if (!server) {
+            return util::make_unexpected(std::string("Server configuration is required in server mode"));
+        }
+
+        // Validate TCP port
+        if (server->tcp_port == 0) {
+            return util::make_unexpected(std::string("TCP port cannot be 0"));
+        }
+
+        // Validate bootstrap nodes
+        for (const auto& node : server->bootstrap_nodes) {
+            if (node.address.empty()) {
+                return util::make_unexpected(std::string("Bootstrap node address cannot be empty"));
+            }
+            if (node.port == 0) {
+                return util::make_unexpected(std::string("Bootstrap node port cannot be 0"));
+            }
+            if (node.public_key.length() != tox::kPublicKeyHexLen) {
+                return util::make_unexpected(
+                    std::string("Bootstrap node public key must be ") +
+                    std::to_string(tox::kPublicKeyHexLen) + std::string(" characters, got ") +
+                    std::to_string(node.public_key.length()));
+            }
+            auto pk_result = tox::parse_public_key(node.public_key);
+            if (!pk_result) {
+                return util::make_unexpected(std::string("Invalid bootstrap node public key: ") + pk_result.error());
+            }
+        }
+    } else {  // Client mode
+        if (!client) {
+            return util::make_unexpected(std::string("Client configuration is required in client mode"));
+        }
+
+        // Validate server_id
+        if (client->server_id.empty()) {
+            return util::make_unexpected(std::string("Server ID is required in client mode"));
+        }
+        if (client->server_id.length() != tox::kToxIdHexLen) {
+            return util::make_unexpected(
+                std::string("Server ID must be ") + std::to_string(tox::kToxIdHexLen) +
+                std::string(" characters, got ") + std::to_string(client->server_id.length()));
+        }
+        auto toxid_result = tox::ToxId::from_hex(client->server_id);
+        if (!toxid_result) {
+            return util::make_unexpected(std::string("Invalid server Tox ID: ") + toxid_result.error());
+        }
+
+        // Validate forwarding rules
+        for (const auto& fwd : client->forwards) {
+            if (fwd.local_port == 0) {
+                return util::make_unexpected(std::string("Forward rule local_port cannot be 0"));
+            }
+            if (fwd.remote_host.empty()) {
+                return util::make_unexpected(std::string("Forward rule remote_host cannot be empty"));
+            }
+            if (fwd.remote_port == 0) {
+                return util::make_unexpected(std::string("Forward rule remote_port cannot be 0"));
+            }
+        }
+    }
+
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// Config operations
+// ---------------------------------------------------------------------------
+
+void Config::merge_cli_overrides(const Config& overrides) {
+    // Override mode if set
+    // (Always override mode since there's no "unset" state)
+
+    // Override data_dir if non-empty
+    if (!overrides.data_dir.empty()) {
+        data_dir = overrides.data_dir;
+    }
+
+    // Override logging settings
+    if (overrides.logging.level != util::LogLevel::Info || overrides.logging.file.has_value()) {
+        if (overrides.logging.level != util::LogLevel::Info) {
+            logging.level = overrides.logging.level;
+        }
+        if (overrides.logging.file.has_value()) {
+            logging.file = overrides.logging.file;
+        }
+    }
+
+    // Handle mode change
+    if (overrides.mode != mode) {
+        mode = overrides.mode;
+        if (mode == Mode::Server && !server) {
+            server = ServerConfig{};
+            client.reset();
+        } else if (mode == Mode::Client && !client) {
+            client = ClientConfig{};
+            server.reset();
+        }
+    }
+
+    // Merge server overrides
+    if (overrides.server && server) {
+        if (overrides.server->tcp_port != 33445) {
+            server->tcp_port = overrides.server->tcp_port;
+        }
+        if (!overrides.server->udp_enabled) {
+            server->udp_enabled = overrides.server->udp_enabled;
+        }
+        if (!overrides.server->bootstrap_nodes.empty()) {
+            server->bootstrap_nodes = overrides.server->bootstrap_nodes;
+        }
+        if (overrides.server->rules_file.has_value()) {
+            server->rules_file = overrides.server->rules_file;
+        }
+    }
+
+    // Merge client overrides
+    if (overrides.client && client) {
+        if (!overrides.client->server_id.empty()) {
+            client->server_id = overrides.client->server_id;
+        }
+        if (!overrides.client->forwards.empty()) {
+            client->forwards = overrides.client->forwards;
+        }
+    }
+}
+
+// Helper function to encode LogLevel to string
+static const char* log_level_to_string(util::LogLevel level) {
+    switch (level) {
+        case util::LogLevel::Trace: return "trace";
+        case util::LogLevel::Debug: return "debug";
+        case util::LogLevel::Info: return "info";
+        case util::LogLevel::Warn: return "warn";
+        case util::LogLevel::Error: return "error";
+        case util::LogLevel::Critical: return "critical";
+        case util::LogLevel::Off: return "off";
+        default: return "info";
+    }
+}
+
+std::string Config::to_yaml() const {
+    YAML::Emitter out;
+    out << YAML::BeginMap;
+
+    // Mode
+    out << YAML::Key << "mode" << YAML::Value << (mode == Mode::Server ? "server" : "client");
+
+    // Data directory
+    out << YAML::Key << "data_dir" << YAML::Value << data_dir.string();
+
+    // Logging
+    out << YAML::Key << "logging";
+    out << YAML::BeginMap;
+    out << YAML::Key << "level" << YAML::Value << log_level_to_string(logging.level);
+    if (logging.file) {
+        out << YAML::Key << "file" << YAML::Value << *logging.file;
+    }
+    out << YAML::EndMap;
+
+    // Server config
+    if (server) {
+        out << YAML::Key << "tcp_port" << YAML::Value << server->tcp_port;
+        out << YAML::Key << "udp_enabled" << YAML::Value << server->udp_enabled;
+        if (!server->bootstrap_nodes.empty()) {
+            out << YAML::Key << "bootstrap_nodes";
+            out << YAML::BeginSeq;
+            for (const auto& node : server->bootstrap_nodes) {
+                out << YAML::BeginMap;
+                out << YAML::Key << "address" << YAML::Value << node.address;
+                out << YAML::Key << "port" << YAML::Value << node.port;
+                out << YAML::Key << "public_key" << YAML::Value << node.public_key;
+                out << YAML::EndMap;
+            }
+            out << YAML::EndSeq;
+        }
+        if (server->rules_file) {
+            out << YAML::Key << "rules_file" << YAML::Value << *server->rules_file;
+        }
+    }
+
+    // Client config
+    if (client) {
+        if (!client->server_id.empty()) {
+            out << YAML::Key << "server_id" << YAML::Value << client->server_id;
+        }
+        if (!client->forwards.empty()) {
+            out << YAML::Key << "forwards";
+            out << YAML::BeginSeq;
+            for (const auto& fwd : client->forwards) {
+                out << YAML::BeginMap;
+                out << YAML::Key << "local_port" << YAML::Value << fwd.local_port;
+                out << YAML::Key << "remote_host" << YAML::Value << fwd.remote_host;
+                out << YAML::Key << "remote_port" << YAML::Value << fwd.remote_port;
+                out << YAML::EndMap;
+            }
+            out << YAML::EndSeq;
+        }
+    }
+
+    out << YAML::EndMap;
+    return out.c_str();
+}
+
+util::Expected<void, std::string> Config::save(const std::filesystem::path& filepath) const {
+    try {
+        std::ofstream ofs(filepath);
+        if (!ofs) {
+            return util::make_unexpected(
+                std::string("Failed to open file for writing: ") + filepath.string());
+        }
+        ofs << to_yaml();
+        return {};
+    } catch (const std::exception& e) {
+        return util::make_unexpected(std::string("Failed to save config: ") + e.what());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Config accessors
+// ---------------------------------------------------------------------------
+
+const ServerConfig& Config::server_config() const {
+    if (!server) {
+        throw std::runtime_error("Not in server mode");
+    }
+    return *server;
+}
+
+const ClientConfig& Config::client_config() const {
+    if (!client) {
+        throw std::runtime_error("Not in client mode");
+    }
+    return *client;
+}
+
+}  // namespace toxtunnel
+
+// ---------------------------------------------------------------------------
+// YAML encoding/decoding implementations
+// ---------------------------------------------------------------------------
+
+namespace YAML {
+
+using toxtunnel::ForwardRule;
+using toxtunnel::BootstrapNodeConfig;
+using toxtunnel::LoggingConfig;
+using toxtunnel::ServerConfig;
+using toxtunnel::ClientConfig;
+using toxtunnel::Mode;
+using toxtunnel::Config;
+using toxtunnel::tox::kPublicKeyHexLen;
+
+// ---------------------------------------------------------------------------
+// ForwardRule
+// ---------------------------------------------------------------------------
+
+Node convert<ForwardRule>::encode(const ForwardRule& rhs) {
+    Node node;
+    node["local_port"] = rhs.local_port;
+    node["remote_host"] = rhs.remote_host;
+    node["remote_port"] = rhs.remote_port;
+    return node;
+}
+
+bool convert<ForwardRule>::decode(const Node& node, ForwardRule& rhs) {
+    if (!node.IsMap()) {
+        return false;
+    }
+
+    if (!node["local_port"]) {
+        return false;
+    }
+    rhs.local_port = node["local_port"].as<uint16_t>();
+
+    if (!node["remote_host"]) {
+        return false;
+    }
+    rhs.remote_host = node["remote_host"].as<std::string>();
+
+    if (!node["remote_port"]) {
+        return false;
+    }
+    rhs.remote_port = node["remote_port"].as<uint16_t>();
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// BootstrapNodeConfig
+// ---------------------------------------------------------------------------
+
+Node convert<BootstrapNodeConfig>::encode(const BootstrapNodeConfig& rhs) {
+    Node node;
+    node["address"] = rhs.address;
+    node["port"] = rhs.port;
+    node["public_key"] = rhs.public_key;
+    return node;
+}
+
+bool convert<BootstrapNodeConfig>::decode(const Node& node, BootstrapNodeConfig& rhs) {
+    if (!node.IsMap()) {
+        return false;
+    }
+
+    if (!node["address"]) {
+        return false;
+    }
+    rhs.address = node["address"].as<std::string>();
+
+    rhs.port = node["port"] ? node["port"].as<uint16_t>() : 33445;
+
+    if (!node["public_key"]) {
+        return false;
+    }
+    rhs.public_key = node["public_key"].as<std::string>();
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// LoggingConfig
+// ---------------------------------------------------------------------------
+
+Node convert<LoggingConfig>::encode(const LoggingConfig& rhs) {
+    Node node;
+    node["level"] = convert<toxtunnel::util::LogLevel>::encode(rhs.level);
+    if (rhs.file) {
+        node["file"] = *rhs.file;
+    }
+    return node;
+}
+
+bool convert<LoggingConfig>::decode(const Node& node, LoggingConfig& rhs) {
+    if (!node.IsMap()) {
+        // Allow scalar "level" for logging
+        if (node.IsScalar()) {
+            rhs.level = node.as<toxtunnel::util::LogLevel>();
+            return true;
+        }
+        return false;
+    }
+
+    if (node["level"]) {
+        rhs.level = node["level"].as<toxtunnel::util::LogLevel>();
+    }
+
+    if (node["file"]) {
+        rhs.file = node["file"].as<std::string>();
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// ServerConfig
+// ---------------------------------------------------------------------------
+
+Node convert<ServerConfig>::encode(const ServerConfig& rhs) {
+    Node node;
+    node["tcp_port"] = rhs.tcp_port;
+    node["udp_enabled"] = rhs.udp_enabled;
+    if (!rhs.bootstrap_nodes.empty()) {
+        node["bootstrap_nodes"] = rhs.bootstrap_nodes;
+    }
+    if (rhs.rules_file) {
+        node["rules_file"] = *rhs.rules_file;
+    }
+    return node;
+}
+
+bool convert<ServerConfig>::decode(const Node& node, ServerConfig& rhs) {
+    if (!node.IsMap()) {
+        return false;
+    }
+
+    if (node["tcp_port"]) {
+        rhs.tcp_port = node["tcp_port"].as<uint16_t>();
+    }
+
+    if (node["udp_enabled"]) {
+        rhs.udp_enabled = node["udp_enabled"].as<bool>();
+    }
+
+    if (node["bootstrap_nodes"]) {
+        rhs.bootstrap_nodes = node["bootstrap_nodes"].as<std::vector<BootstrapNodeConfig>>();
+    }
+
+    if (node["rules_file"]) {
+        rhs.rules_file = node["rules_file"].as<std::string>();
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// ClientConfig
+// ---------------------------------------------------------------------------
+
+Node convert<ClientConfig>::encode(const ClientConfig& rhs) {
+    Node node;
+    node["server_id"] = rhs.server_id;
+    if (!rhs.forwards.empty()) {
+        node["forwards"] = rhs.forwards;
+    }
+    return node;
+}
+
+bool convert<ClientConfig>::decode(const Node& node, ClientConfig& rhs) {
+    if (!node.IsMap()) {
+        return false;
+    }
+
+    if (node["server_id"]) {
+        rhs.server_id = node["server_id"].as<std::string>();
+    }
+
+    if (node["forwards"]) {
+        rhs.forwards = node["forwards"].as<std::vector<ForwardRule>>();
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Mode
+// ---------------------------------------------------------------------------
+
+Node convert<Mode>::encode(const Mode& rhs) {
+    return Node(rhs == Mode::Server ? "server" : "client");
+}
+
+bool convert<Mode>::decode(const Node& node, Mode& rhs) {
+    if (!node.IsScalar()) {
+        return false;
+    }
+
+    auto str = node.as<std::string>();
+    if (str == "server") {
+        rhs = Mode::Server;
+        return true;
+    } else if (str == "client") {
+        rhs = Mode::Client;
+        return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// LogLevel
+// ---------------------------------------------------------------------------
+
+Node convert<toxtunnel::util::LogLevel>::encode(const toxtunnel::util::LogLevel& rhs) {
+    switch (rhs) {
+        case toxtunnel::util::LogLevel::Trace: return Node("trace");
+        case toxtunnel::util::LogLevel::Debug: return Node("debug");
+        case toxtunnel::util::LogLevel::Info: return Node("info");
+        case toxtunnel::util::LogLevel::Warn: return Node("warn");
+        case toxtunnel::util::LogLevel::Error: return Node("error");
+        case toxtunnel::util::LogLevel::Critical: return Node("critical");
+        case toxtunnel::util::LogLevel::Off: return Node("off");
+        default: return Node("info");
+    }
+}
+
+bool convert<toxtunnel::util::LogLevel>::decode(const Node& node, toxtunnel::util::LogLevel& rhs) {
+    if (!node.IsScalar()) {
+        return false;
+    }
+
+    auto str = node.as<std::string>();
+    // Case-insensitive comparison
+    std::transform(str.begin(), str.end(), str.begin(), ::tolower);
+
+    if (str == "trace") {
+        rhs = toxtunnel::util::LogLevel::Trace;
+    } else if (str == "debug") {
+        rhs = toxtunnel::util::LogLevel::Debug;
+    } else if (str == "info") {
+        rhs = toxtunnel::util::LogLevel::Info;
+    } else if (str == "warn" || str == "warning") {
+        rhs = toxtunnel::util::LogLevel::Warn;
+    } else if (str == "error") {
+        rhs = toxtunnel::util::LogLevel::Error;
+    } else if (str == "critical") {
+        rhs = toxtunnel::util::LogLevel::Critical;
+    } else if (str == "off") {
+        rhs = toxtunnel::util::LogLevel::Off;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+Node convert<Config>::encode(const Config& rhs) {
+    Node node;
+    node["mode"] = rhs.mode;
+    node["data_dir"] = rhs.data_dir.string();
+    node["logging"] = rhs.logging;
+
+    if (rhs.server) {
+        node["tcp_port"] = rhs.server->tcp_port;
+        node["udp_enabled"] = rhs.server->udp_enabled;
+        if (!rhs.server->bootstrap_nodes.empty()) {
+            node["bootstrap_nodes"] = rhs.server->bootstrap_nodes;
+        }
+        if (rhs.server->rules_file) {
+            node["rules_file"] = *rhs.server->rules_file;
+        }
+    }
+
+    if (rhs.client) {
+        if (!rhs.client->server_id.empty()) {
+            node["server_id"] = rhs.client->server_id;
+        }
+        if (!rhs.client->forwards.empty()) {
+            node["forwards"] = rhs.client->forwards;
+        }
+    }
+
+    return node;
+}
+
+bool convert<Config>::decode(const Node& node, Config& rhs) {
+    if (!node.IsMap()) {
+        return false;
+    }
+
+    // Mode is required
+    if (!node["mode"]) {
+        return false;
+    }
+    rhs.mode = node["mode"].as<Mode>();
+
+    // Data directory
+    if (node["data_dir"]) {
+        rhs.data_dir = node["data_dir"].as<std::string>();
+    }
+
+    // Logging
+    if (node["logging"]) {
+        rhs.logging = node["logging"].as<LoggingConfig>();
+    }
+
+    // Mode-specific config
+    if (rhs.mode == Mode::Server) {
+        rhs.server = ServerConfig{};
+
+        if (node["tcp_port"]) {
+            rhs.server->tcp_port = node["tcp_port"].as<uint16_t>();
+        }
+
+        if (node["udp_enabled"]) {
+            rhs.server->udp_enabled = node["udp_enabled"].as<bool>();
+        }
+
+        if (node["bootstrap_nodes"]) {
+            rhs.server->bootstrap_nodes =
+                node["bootstrap_nodes"].as<std::vector<BootstrapNodeConfig>>();
+        }
+
+        if (node["rules_file"]) {
+            rhs.server->rules_file = node["rules_file"].as<std::string>();
+        }
+    } else {  // Client mode
+        rhs.client = ClientConfig{};
+
+        if (node["server_id"]) {
+            rhs.client->server_id = node["server_id"].as<std::string>();
+        }
+
+        if (node["forwards"]) {
+            rhs.client->forwards = node["forwards"].as<std::vector<ForwardRule>>();
+        }
+    }
+
+    return true;
+}
+
+}  // namespace YAML
