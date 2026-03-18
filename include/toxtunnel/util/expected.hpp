@@ -101,6 +101,50 @@ class Expected {
     std::variant<T, E> storage_;
 };
 
+/// Partial specialization for Expected<void, E> (operations that can fail
+/// but produce no value on success).
+template <typename E>
+class Expected<void, E> {
+   public:
+    // Construct in the success state.
+    Expected() : has_value_(true) {}
+
+    // Construct with error via unexpected wrapper.
+    Expected(const unexpected<E>& u) : has_value_(false), error_(u.value()) {}
+    Expected(unexpected<E>&& u) : has_value_(false), error_(std::move(u).value()) {}
+
+    // Check if has value (success)
+    [[nodiscard]] bool has_value() const { return has_value_; }
+
+    [[nodiscard]] explicit operator bool() const { return has_value_; }
+
+    // Access error (throws if success)
+    E& error() & {
+        if (has_value_) {
+            throw std::runtime_error("Expected<void> contains value");
+        }
+        return error_;
+    }
+
+    const E& error() const& {
+        if (has_value_) {
+            throw std::runtime_error("Expected<void> contains value");
+        }
+        return error_;
+    }
+
+    E&& error() && {
+        if (has_value_) {
+            throw std::runtime_error("Expected<void> contains value");
+        }
+        return std::move(error_);
+    }
+
+   private:
+    bool has_value_;
+    E error_{};
+};
+
 /// Helper function to create an Expected in the error state.
 template <typename E>
 unexpected<std::decay_t<E>> make_unexpected(E&& e) {
