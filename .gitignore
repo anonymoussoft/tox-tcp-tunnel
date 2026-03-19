@@ -24,3 +24,10 @@ Testing/
 CMakeCache.txt
 CMakeFiles/
 compile_commands.json
+
+# Local/OS artifacts
+.DS_Store
+docker_build/
+
+# Local superpowers docs (keep local, do not track)
+docs/superpowers/

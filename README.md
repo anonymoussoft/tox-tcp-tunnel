@@ -18,16 +18,90 @@ ToxTunnel lets you forward TCP ports through the Tox peer-to-peer network. Traff
 
 ### Prerequisites
 
-- C++20 compiler (GCC 10+, Clang 13+, MSVC 2019+)
-- CMake 3.16+
-- libsodium (`brew install libsodium` / `apt install libsodium-dev`)
+| Dependency | Version | Notes |
+|---|---|---|
+| C++ compiler | GCC 10+, Clang 13+, or MSVC 2019+ | Must support C++20 |
+| CMake | 3.16+ | Build system generator |
+| git | any | For cloning and submodules |
+| pkg-config | any | Required by c-toxcore's build (not needed on Windows/MSVC) |
+| libsodium | any | Cryptography library, required by c-toxcore |
 
-toxcore is included as a git submodule and built from source. No system toxcore installation is needed.
+toxcore is included as a git submodule and built from source. Other C++ dependencies (asio, spdlog, CLI11, yaml-cpp, googletest) are fetched automatically by CMake via FetchContent. No additional manual installation is needed for those.
+
+### Installing dependencies by platform
+
+#### macOS (x86_64 / aarch64)
+
+Homebrew installs native packages for both Intel and Apple Silicon automatically.
+
+```bash
+# Install Xcode Command Line Tools (provides Clang with C++20 support)
+xcode-select --install
+
+# Install dependencies via Homebrew
+brew install cmake pkg-config libsodium
+```
+
+#### Linux -- Ubuntu / Debian (x86_64 / aarch64)
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake git pkg-config libsodium-dev
+```
+
+`build-essential` provides GCC (with C++20 support on Ubuntu 22.04+ / Debian 12+).
+
+#### Linux -- Fedora / RHEL (x86_64 / aarch64)
+
+```bash
+sudo dnf install -y gcc-c++ cmake git pkgconf-pkg-config libsodium-devel
+```
+
+#### Linux -- Arch Linux (x86_64)
+
+```bash
+sudo pacman -S --needed base-devel cmake git pkgconf libsodium
+```
+
+#### Windows (x86_64 / aarch64)
+
+**Option A: MSVC + vcpkg**
+
+1. Install [Visual Studio 2022](https://visualstudio.microsoft.com/) (or Build Tools) with the "Desktop development with C++" workload.
+2. Install [CMake](https://cmake.org/download/) (or use the one bundled with Visual Studio).
+3. Install [vcpkg](https://github.com/microsoft/vcpkg) and install libsodium:
+
+```powershell
+git clone https://github.com/microsoft/vcpkg.git
+cd vcpkg
+.\bootstrap-vcpkg.bat
+.\vcpkg install libsodium:x64-windows      # for x86_64
+.\vcpkg install libsodium:arm64-windows    # for aarch64
+```
+
+When configuring CMake, pass the vcpkg toolchain file:
+
+```powershell
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=<path-to-vcpkg>/scripts/buildsystems/vcpkg.cmake
+cmake --build build --config Release
+```
+
+**Option B: MSYS2 / MinGW-w64**
+
+1. Install [MSYS2](https://www.msys2.org/).
+2. Open the MSYS2 UCRT64 shell and install dependencies:
+
+```bash
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
+    mingw-w64-ucrt-x86_64-pkg-config mingw-w64-ucrt-x86_64-libsodium git
+```
+
+Then build using the standard CMake commands below inside the MSYS2 shell.
 
 ### Clone and build
 
 ```bash
-git clone --recursive https://github.com/<you>/tox-tcp-tunnel.git
+git clone --recursive https://github.com/anonymoussoft/tox-tcp-tunnel.git
 cd tox-tcp-tunnel
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -38,6 +112,19 @@ If you already cloned without `--recursive`, fetch submodules first:
 
 ```bash
 git submodule update --init --recursive
+```
+
+For parallel builds, pass `-j` with the number of CPU cores:
+
+```bash
+cmake --build build -j$(nproc)        # Linux
+cmake --build build -j$(sysctl -n hw.ncpu)  # macOS
+```
+
+On Windows with MSVC, use:
+
+```powershell
+cmake --build build --config Release --parallel
 ```
 
 ### CMake options
@@ -52,6 +139,97 @@ git submodule update --init --recursive
 ```bash
 ./build/tests/unit_tests
 ./build/tests/integration_tests
+
+# Or via CTest
+cd build && ctest --output-on-failure
+```
+
+On Windows with MSVC, test binaries are under the configuration subdirectory:
+
+```powershell
+.\build\tests\Release\unit_tests.exe
+.\build\tests\Release\integration_tests.exe
+```
+
+### Building with Docker
+
+You can build ToxTunnel inside a Docker container without installing dependencies on the host. The examples below use `ubuntu:24.04`, which supports both `linux/amd64` and `linux/arm64` architectures natively.
+
+#### Quick build (single architecture)
+
+```bash
+docker run --rm -v "$(pwd)":/src -w /src ubuntu:24.04 bash -c '
+    apt-get update &&
+    apt-get install -y build-essential cmake git pkg-config libsodium-dev &&
+    cmake -B build -DCMAKE_BUILD_TYPE=Release &&
+    cmake --build build -j$(nproc) &&
+    build/tests/unit_tests &&
+    build/tests/integration_tests
+'
+```
+
+The built binary is at `build/bin/toxtunnel` on the host after the container exits.
+
+#### Using a Dockerfile
+
+Create a `Dockerfile` (or use the one below) for reproducible builds:
+
+```dockerfile
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        git \
+        pkg-config \
+        libsodium-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build -j$(nproc)
+
+# Run tests as a build verification step
+RUN build/tests/unit_tests && build/tests/integration_tests
+
+# Copy binary to a clean location
+RUN cp build/bin/toxtunnel /usr/local/bin/toxtunnel
+
+ENTRYPOINT ["toxtunnel"]
+```
+
+Build and run:
+
+```bash
+docker build -t toxtunnel .
+docker run --rm toxtunnel --help
+```
+
+#### Multi-architecture build (x86_64 + aarch64)
+
+Use Docker Buildx to build images for both architectures:
+
+```bash
+# Create a buildx builder (one-time setup)
+docker buildx create --name multiarch --use
+
+# Build and push for both architectures
+docker buildx build --platform linux/amd64,linux/arm64 -t toxtunnel:latest .
+```
+
+#### Extract the binary from a Docker build
+
+To extract just the compiled binary without keeping the image:
+
+```bash
+docker build -t toxtunnel-build .
+docker create --name extract toxtunnel-build
+docker cp extract:/usr/local/bin/toxtunnel ./toxtunnel
+docker rm extract
 ```
 
 ## Usage
