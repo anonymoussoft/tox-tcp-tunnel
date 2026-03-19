@@ -3,7 +3,7 @@
 #include "toxtunnel/tox/tox_save.hpp"
 #include "toxtunnel/tox/types.hpp"
 
-#include <tox/tox.h>
+#include <toxcore/tox.h>
 
 #include <atomic>
 #include <condition_variable>

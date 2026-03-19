@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.14)
-project(toxtunnel VERSION 1.0.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.16)
+project(toxtunnel VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,8 +19,21 @@ if(NOT MSVC AND TOXTUNNEL_ENABLE_ASAN)
 endif()
 
 # Dependencies
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(TOXCORE REQUIRED toxcore)
+set(BUILD_TOXAV OFF CACHE BOOL "" FORCE)
+set(AUTOTEST OFF CACHE BOOL "" FORCE)
+set(UNITTEST OFF CACHE BOOL "" FORCE)
+set(BUILD_FUN_UTILS OFF CACHE BOOL "" FORCE)
+set(DHT_BOOTSTRAP OFF CACHE BOOL "" FORCE)
+set(BOOTSTRAP_DAEMON OFF CACHE BOOL "" FORCE)
+set(ENABLE_SHARED OFF CACHE BOOL "" FORCE)
+set(ENABLE_STATIC ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/c-toxcore)
+
+add_library(toxcore_wrapper INTERFACE)
+target_link_libraries(toxcore_wrapper INTERFACE toxcore_static)
+target_include_directories(toxcore_wrapper SYSTEM INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/c-toxcore
+)
 
 include(FetchContent)
 
@@ -81,13 +94,9 @@ target_sources(toxtunnel_lib PRIVATE
 target_include_directories(toxtunnel_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${asio_SOURCE_DIR}/asio/include
-    ${TOXCORE_INCLUDE_DIRS}
-)
-target_link_directories(toxtunnel_lib PUBLIC
-    ${TOXCORE_LIBRARY_DIRS}
 )
 target_link_libraries(toxtunnel_lib PUBLIC
-    ${TOXCORE_LIBRARIES}
+    toxcore_wrapper
     spdlog::spdlog
     yaml-cpp
 )

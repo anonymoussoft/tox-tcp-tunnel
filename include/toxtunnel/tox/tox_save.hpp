@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include <tox/tox.h>
+#include <toxcore/tox.h>
 
 #include "toxtunnel/util/expected.hpp"
 

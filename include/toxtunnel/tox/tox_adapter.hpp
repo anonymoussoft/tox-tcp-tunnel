@@ -1,6 +1,6 @@
 #pragma once
 
-#include <tox/tox.h>
+#include <toxcore/tox.h>
 
 #include "toxtunnel/tox/types.hpp"
 #include "toxtunnel/util/expected.hpp"
