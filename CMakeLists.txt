@@ -64,11 +64,14 @@ target_sources(toxtunnel_lib PRIVATE
     src/core/tcp_connection.cpp
     src/core/tcp_listener.cpp
     src/tunnel/protocol.cpp
+    src/tunnel/tunnel.cpp
+    src/tunnel/tunnel_manager.cpp
     src/tox/types.cpp
     src/tox/tox_save.cpp
     src/tox/tox_thread.cpp
     src/tox/tox_connection.cpp
     src/tox/tox_adapter.cpp
+    src/app/rules_engine.cpp
     src/util/config.cpp
     src/util/error.cpp
     src/util/logger.cpp

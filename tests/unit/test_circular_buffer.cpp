@@ -363,8 +363,8 @@ TEST_F(CircularBufferTest, PartialWrite_NearlyFull) {
 // ============================================================================
 
 TEST_F(CircularBufferTest, ThreadSafety_ConcurrentWriteRead) {
-    CircularBuffer<int> thread_buffer{100};
     constexpr int num_items = 1000;
+    CircularBuffer<int> thread_buffer{static_cast<std::size_t>(num_items)};
 
     // Writer thread
     std::thread writer([&thread_buffer]() {
@@ -407,9 +407,9 @@ TEST_F(CircularBufferTest, ThreadSafety_ConcurrentWriteRead) {
 }
 
 TEST_F(CircularBufferTest, ThreadSafety_MultipleWriters) {
-    CircularBuffer<int> thread_buffer{200};
     constexpr int items_per_thread = 500;
     constexpr int num_writers = 4;
+    CircularBuffer<int> thread_buffer{static_cast<std::size_t>(items_per_thread * num_writers)};
 
     std::vector<std::thread> writers;
     for (int w = 0; w < num_writers; ++w) {
@@ -441,8 +441,8 @@ TEST_F(CircularBufferTest, ThreadSafety_MultipleWriters) {
 }
 
 TEST_F(CircularBufferTest, ThreadSafety_StressTest) {
-    CircularBuffer<int> stress_buffer{50};
     constexpr int num_operations = 10000;
+    CircularBuffer<int> stress_buffer{static_cast<std::size_t>(num_operations)};
     std::atomic<int> writes_completed{0};
     std::atomic<int> reads_completed{0};
 

@@ -58,7 +58,7 @@ TEST_F(ConfigTest, ParseMinimalClientConfig) {
     const char* yaml = R"(
 mode: client
 data_dir: ~/.config/toxtunnel
-server_id: 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+server_id: 0000000000000000000000000000000000000000000000000000000000000000000000000000
 )";
 
     auto result = Config::from_string(yaml);
@@ -68,7 +68,7 @@ server_id: 000000000000000000000000000000000000000000000000000000000000000000000
     EXPECT_EQ(config.mode, Mode::Client);
     EXPECT_TRUE(config.client.has_value());
     EXPECT_EQ(config.client->server_id,
-              "00000000000000000000000000000000000000000000000000000000000000000000000000000000");
+              "0000000000000000000000000000000000000000000000000000000000000000000000000000");
 }
 
 TEST_F(ConfigTest, ParseFullServerConfig) {
@@ -112,7 +112,7 @@ TEST_F(ConfigTest, ParseFullClientConfig) {
     const char* yaml = R"(
 mode: client
 data_dir: ~/.config/toxtunnel
-server_id: 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+server_id: 0000000000000000000000000000000000000000000000000000000000000000000000000000
 forwards:
   - local_port: 2222
     remote_host: localhost
@@ -131,7 +131,7 @@ logging:
     EXPECT_EQ(config.mode, Mode::Client);
     ASSERT_TRUE(config.client.has_value());
     EXPECT_EQ(config.client->server_id,
-              "00000000000000000000000000000000000000000000000000000000000000000000000000000000");
+              "0000000000000000000000000000000000000000000000000000000000000000000000000000");
     ASSERT_EQ(config.client->forwards.size(), 2);
 
     EXPECT_EQ(config.client->forwards[0].local_port, 2222);
@@ -248,7 +248,7 @@ TEST_F(ConfigTest, ValidateValidClientConfig) {
     const char* yaml = R"(
 mode: client
 data_dir: ~/.config/toxtunnel
-server_id: 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+server_id: 0000000000000000000000000000000000000000000000000000000000000000000000000000
 forwards:
   - local_port: 2222
     remote_host: localhost
@@ -293,7 +293,7 @@ TEST_F(ConfigTest, ValidateForwardRuleMissingRemoteHost) {
     const char* yaml = R"(
 mode: client
 data_dir: ~/.config/toxtunnel
-server_id: 00000000000000000000000000000000000000000000000000000000000000000000000000000000
+server_id: 0000000000000000000000000000000000000000000000000000000000000000000000000000
 forwards:
   - local_port: 2222
     remote_port: 22
@@ -440,7 +440,7 @@ TEST_F(ConfigTest, ToYamlClient) {
     Config config = Config::default_client();
     config.data_dir = "/client/path";
     config.client->server_id =
-        "00000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        "0000000000000000000000000000000000000000000000000000000000000000000000000000";
     config.client->forwards.push_back({2222, "localhost", 22});
 
     std::string yaml = config.to_yaml();
@@ -479,7 +479,7 @@ TEST_F(ConfigTest, RoundTripClient) {
     Config original = Config::default_client();
     original.data_dir = "/client/round/trip";
     original.client->server_id =
-        "00000000000000000000000000000000000000000000000000000000000000000000000000000001";
+        "0000000000000000000000000000000000000000000000000000000000000000000000000001";
     original.client->forwards.push_back({8080, "192.168.1.1", 80});
     original.client->forwards.push_back({2222, "localhost", 22});
 
@@ -544,17 +544,17 @@ TEST_F(ConfigTest, MergeOverrideTcpPort) {
 TEST_F(ConfigTest, MergeOverrideServerId) {
     Config base = Config::default_client();
     base.client->server_id =
-        "00000000000000000000000000000000000000000000000000000000000000000000000000000001";
+        "0000000000000000000000000000000000000000000000000000000000000000000000000001";
 
     Config overrides;
     overrides.mode = Mode::Client;
     overrides.client = ClientConfig{};
     overrides.client->server_id =
-        "00000000000000000000000000000000000000000000000000000000000000000000000000000002";
+        "0000000000000000000000000000000000000000000000000000000000000000000000000002";
 
     base.merge_cli_overrides(overrides);
     EXPECT_EQ(base.client->server_id,
-              "00000000000000000000000000000000000000000000000000000000000000000000000000000002");
+              "0000000000000000000000000000000000000000000000000000000000000000000000000002");
 }
 
 TEST_F(ConfigTest, MergeOverrideForwards) {
@@ -575,7 +575,7 @@ TEST_F(ConfigTest, MergeOverrideForwards) {
 TEST_F(ConfigTest, MergeDoesNotOverrideEmptyString) {
     Config base = Config::default_client();
     base.client->server_id =
-        "00000000000000000000000000000000000000000000000000000000000000000000000000000001";
+        "0000000000000000000000000000000000000000000000000000000000000000000000000001";
 
     Config overrides;
     overrides.mode = Mode::Client;
@@ -584,7 +584,7 @@ TEST_F(ConfigTest, MergeDoesNotOverrideEmptyString) {
 
     base.merge_cli_overrides(overrides);
     EXPECT_EQ(base.client->server_id,
-              "00000000000000000000000000000000000000000000000000000000000000000000000000000001");
+              "0000000000000000000000000000000000000000000000000000000000000000000000000001");
 }
 
 // ---------------------------------------------------------------------------

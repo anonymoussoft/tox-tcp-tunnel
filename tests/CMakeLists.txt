@@ -16,10 +16,14 @@ add_executable(unit_tests
     unit/test_expected.cpp
     unit/test_circular_buffer.cpp
     unit/test_config.cpp
+    unit/test_rules_engine.cpp
+    unit/test_tunnel.cpp
+    unit/test_tunnel_manager.cpp
 )
 target_link_libraries(unit_tests PRIVATE
     toxtunnel_lib
     GTest::gtest_main
+    GTest::gmock
 )
 if(MSVC)
     target_compile_options(unit_tests PRIVATE /W4 /WX)
