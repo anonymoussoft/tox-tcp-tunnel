@@ -1,0 +1,203 @@
+#include "toxtunnel/tox/bootstrap_source.hpp"
+
+#include <yaml-cpp/yaml.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <system_error>
+
+namespace toxtunnel::tox {
+namespace {
+
+constexpr const char* kCacheFileName = "bootstrap_nodes.json";
+
+std::string trim_trailing_whitespace(std::string value) {
+    while (!value.empty()) {
+        const char ch = value.back();
+        if (ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t') {
+            value.pop_back();
+            continue;
+        }
+        break;
+    }
+    return value;
+}
+
+util::Expected<std::vector<BootstrapNode>, std::string> load_cached_nodes(
+    const std::filesystem::path& cache_path,
+    std::size_t max_nodes) {
+    if (!std::filesystem::exists(cache_path)) {
+        return util::unexpected(std::string("bootstrap cache file not found"));
+    }
+
+    std::ifstream input(cache_path);
+    if (!input) {
+        return util::unexpected(std::string("failed to open bootstrap cache"));
+    }
+
+    std::stringstream buffer;
+    buffer << input.rdbuf();
+    return BootstrapSource::parse_nodes_json(buffer.str(), max_nodes);
+}
+
+void write_cache(const std::filesystem::path& cache_path, std::string_view json) {
+    std::error_code ec;
+    std::filesystem::create_directories(cache_path.parent_path(), ec);
+    if (ec) {
+        return;
+    }
+
+    std::ofstream output(cache_path);
+    if (!output) {
+        return;
+    }
+    output << json;
+}
+
+}  // namespace
+
+util::Expected<std::vector<BootstrapNode>, std::string>
+BootstrapSource::parse_nodes_json(std::string_view json, std::size_t max_nodes) {
+    YAML::Node root;
+    try {
+        root = YAML::Load(std::string(json));
+    } catch (const std::exception& ex) {
+        return util::unexpected(std::string("failed to parse nodes JSON: ") + ex.what());
+    }
+
+    YAML::Node nodes_node = root;
+    if (root.IsMap() && root["nodes"]) {
+        nodes_node = root["nodes"];
+    }
+
+    if (!nodes_node.IsSequence()) {
+        return util::unexpected(std::string("nodes JSON root must contain a nodes array"));
+    }
+
+    std::vector<BootstrapNode> nodes;
+    nodes.reserve(std::min<std::size_t>(nodes_node.size(), max_nodes));
+
+    for (const auto& entry : nodes_node) {
+        if (nodes.size() >= max_nodes) {
+            break;
+        }
+
+        if (!entry.IsMap()) {
+            continue;
+        }
+
+        const bool status_udp = entry["status_udp"] && entry["status_udp"].as<bool>();
+        if (!status_udp) {
+            continue;
+        }
+
+        std::string host;
+        if (entry["ipv4"] && !entry["ipv4"].as<std::string>().empty()) {
+            host = entry["ipv4"].as<std::string>();
+        } else if (entry["ipv6"] && !entry["ipv6"].as<std::string>().empty()) {
+            host = entry["ipv6"].as<std::string>();
+        } else {
+            continue;
+        }
+
+        if (!entry["port"] || !entry["public_key"]) {
+            continue;
+        }
+
+        const auto key_result = parse_public_key(entry["public_key"].as<std::string>());
+        if (!key_result) {
+            continue;
+        }
+
+        BootstrapNode node;
+        node.ip = std::move(host);
+        node.port = entry["port"].as<uint16_t>();
+        node.public_key = key_result.value();
+        nodes.push_back(std::move(node));
+    }
+
+    if (nodes.empty()) {
+        return util::unexpected(std::string("nodes JSON did not contain any usable UDP nodes"));
+    }
+
+    return nodes;
+}
+
+util::Expected<std::vector<BootstrapNode>, std::string>
+BootstrapSource::resolve_bootstrap_nodes(const std::vector<BootstrapNode>& configured_nodes,
+                                         const std::filesystem::path& data_dir,
+                                         Fetcher fetcher,
+                                         std::size_t max_nodes) {
+    if (!configured_nodes.empty()) {
+        return configured_nodes;
+    }
+
+    if (!fetcher) {
+        fetcher = [] { return fetch_default_nodes_json(); };
+    }
+
+    const auto cache_path = cache_file_path(data_dir);
+    const auto fetched_json = fetcher();
+    if (fetched_json) {
+        auto parsed = parse_nodes_json(fetched_json.value(), max_nodes);
+        if (parsed) {
+            write_cache(cache_path, fetched_json.value());
+            return parsed;
+        }
+    }
+
+    return load_cached_nodes(cache_path, max_nodes);
+}
+
+util::Expected<std::string, BootstrapFetchError> BootstrapSource::fetch_default_nodes_json() {
+    static constexpr const char* kCommand =
+        "curl -fsSL --connect-timeout 10 --max-time 20 https://nodes.tox.chat/json";
+
+#if defined(_WIN32)
+    FILE* pipe = _popen(kCommand, "r");
+#else
+    FILE* pipe = popen(kCommand, "r");
+#endif
+
+    if (!pipe) {
+        return util::unexpected(BootstrapFetchError{
+            std::string("failed to execute curl for bootstrap nodes")});
+    }
+
+    std::array<char, 4096> buffer{};
+    std::string output;
+    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        output.append(buffer.data());
+    }
+
+#if defined(_WIN32)
+    const int exit_code = _pclose(pipe);
+#else
+    const int exit_code = pclose(pipe);
+#endif
+    if (exit_code != 0) {
+        return util::unexpected(BootstrapFetchError{
+            std::string("curl exited with status ") + std::to_string(exit_code)});
+    }
+
+    output = trim_trailing_whitespace(std::move(output));
+    if (output.empty()) {
+        return util::unexpected(BootstrapFetchError{
+            std::string("bootstrap node fetch returned empty output")});
+    }
+
+    return output;
+}
+
+std::filesystem::path BootstrapSource::cache_file_path(const std::filesystem::path& data_dir) {
+    if (data_dir.empty()) {
+        return std::filesystem::path(kCacheFileName);
+    }
+    return data_dir / kCacheFileName;
+}
+
+}  // namespace toxtunnel::tox

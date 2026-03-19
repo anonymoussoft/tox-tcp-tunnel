@@ -1,5 +1,6 @@
 #include "toxtunnel/tox/tox_adapter.hpp"
 
+#include "toxtunnel/tox/bootstrap_source.hpp"
 #include "toxtunnel/util/logger.hpp"
 
 #include <algorithm>
@@ -261,10 +262,24 @@ std::size_t ToxAdapter::bootstrap() {
         return 0;
     }
 
+    std::vector<BootstrapNode> bootstrap_nodes = config_.bootstrap_nodes;
+    if (bootstrap_nodes.empty()) {
+        auto resolved = BootstrapSource::resolve_bootstrap_nodes({}, config_.data_dir);
+        if (resolved) {
+            bootstrap_nodes = resolved.value();
+            util::Logger::info("Loaded {} bootstrap node(s) from {}",
+                               bootstrap_nodes.size(),
+                               std::string(BootstrapSource::kDefaultNodesUrl));
+        } else {
+            util::Logger::warn("No bootstrap nodes configured and default discovery failed: {}",
+                               resolved.error());
+        }
+    }
+
     std::size_t success_count = 0;
     std::lock_guard<std::mutex> lock(tox_mutex_);
 
-    for (const auto& node : config_.bootstrap_nodes) {
+    for (const auto& node : bootstrap_nodes) {
         TOX_ERR_BOOTSTRAP err;
         bool ok = tox_bootstrap(
             tox_.get(),
@@ -297,7 +312,7 @@ std::size_t ToxAdapter::bootstrap() {
     }
 
     util::Logger::info("Bootstrap complete: {}/{} nodes contacted",
-                       success_count, config_.bootstrap_nodes.size());
+                       success_count, bootstrap_nodes.size());
     return success_count;
 }
 
@@ -709,6 +724,15 @@ bool ToxAdapter::save() const {
     return write_save_data();
 }
 
+void ToxAdapter::enqueue_friend_request_for_test(const PublicKeyArray& public_key,
+                                                 std::string_view message) {
+    enqueue_event(FriendRequestEvent{public_key, std::string(message)});
+}
+
+void ToxAdapter::dispatch_pending_events_for_test() {
+    dispatch_pending_events();
+}
+
 // ===========================================================================
 // Internal: iterate loop
 // ===========================================================================
@@ -723,6 +747,8 @@ void ToxAdapter::run_loop() {
             tox_iterate(tox_.get(), this);
             interval = tox_iteration_interval(tox_.get());
         }
+
+        dispatch_pending_events();
 
         // Sleep for the interval recommended by toxcore.
         std::this_thread::sleep_for(std::chrono::milliseconds(interval));
@@ -742,6 +768,81 @@ void ToxAdapter::register_callbacks() {
     tox_callback_friend_lossy_packet(tox_.get(), on_friend_lossy_packet_cb);
     tox_callback_friend_message(tox_.get(), on_friend_message_cb);
     tox_callback_self_connection_status(tox_.get(), on_self_connection_status_cb);
+}
+
+void ToxAdapter::dispatch_pending_events() {
+    std::vector<CallbackEvent> events;
+    {
+        std::lock_guard<std::mutex> lock(event_mutex_);
+        if (pending_events_.empty()) {
+            return;
+        }
+        events.swap(pending_events_);
+    }
+
+    for (auto& event : events) {
+        std::visit(
+            [this](auto&& current) {
+                using Event = std::decay_t<decltype(current)>;
+
+                if constexpr (std::is_same_v<Event, FriendRequestEvent>) {
+                    FriendRequestCallback cb;
+                    {
+                        std::lock_guard<std::mutex> lock(callback_mutex_);
+                        cb = on_friend_request_;
+                    }
+                    if (cb) {
+                        cb(current.public_key, current.message);
+                    }
+                } else if constexpr (std::is_same_v<Event, FriendConnectionEvent>) {
+                    FriendConnectionCallback cb;
+                    {
+                        std::lock_guard<std::mutex> lock(callback_mutex_);
+                        cb = on_friend_connection_;
+                    }
+                    if (cb) {
+                        cb(current.friend_number, current.connected);
+                    }
+                } else if constexpr (std::is_same_v<Event, FriendLosslessPacketEvent>) {
+                    FriendLosslessPacketCallback cb;
+                    {
+                        std::lock_guard<std::mutex> lock(callback_mutex_);
+                        cb = on_lossless_packet_;
+                    }
+                    if (cb) {
+                        cb(current.friend_number, current.data.data(), current.data.size());
+                    }
+                } else if constexpr (std::is_same_v<Event, FriendLossyPacketEvent>) {
+                    FriendLossyPacketCallback cb;
+                    {
+                        std::lock_guard<std::mutex> lock(callback_mutex_);
+                        cb = on_lossy_packet_;
+                    }
+                    if (cb) {
+                        cb(current.friend_number, current.data.data(), current.data.size());
+                    }
+                } else if constexpr (std::is_same_v<Event, FriendMessageEvent>) {
+                    FriendMessageCallback cb;
+                    {
+                        std::lock_guard<std::mutex> lock(callback_mutex_);
+                        cb = on_friend_message_;
+                    }
+                    if (cb) {
+                        cb(current.friend_number, current.message);
+                    }
+                } else if constexpr (std::is_same_v<Event, SelfConnectionEvent>) {
+                    SelfConnectionCallback cb;
+                    {
+                        std::lock_guard<std::mutex> lock(callback_mutex_);
+                        cb = on_self_connection_;
+                    }
+                    if (cb) {
+                        cb(current.connected);
+                    }
+                }
+            },
+            event);
+    }
 }
 
 // ===========================================================================
@@ -845,11 +946,7 @@ void ToxAdapter::on_friend_request_cb(Tox* /*tox*/, const uint8_t* public_key,
 
     util::Logger::info("Friend request received from {}",
                        bytes_to_hex(pk.data(), pk.size()).substr(0, 16) + "...");
-
-    std::lock_guard<std::mutex> lock(self->callback_mutex_);
-    if (self->on_friend_request_) {
-        self->on_friend_request_(pk, msg);
-    }
+    self->enqueue_event(FriendRequestEvent{pk, std::string(msg)});
 }
 
 void ToxAdapter::on_friend_connection_status_cb(Tox* /*tox*/, uint32_t friend_number,
@@ -861,11 +958,7 @@ void ToxAdapter::on_friend_connection_status_cb(Tox* /*tox*/, uint32_t friend_nu
     util::Logger::info("Friend {} connection status: {}",
                        friend_number,
                        connected ? "connected" : "disconnected");
-
-    std::lock_guard<std::mutex> lock(self->callback_mutex_);
-    if (self->on_friend_connection_) {
-        self->on_friend_connection_(friend_number, connected);
-    }
+    self->enqueue_event(FriendConnectionEvent{friend_number, connected});
 }
 
 void ToxAdapter::on_friend_lossless_packet_cb(Tox* /*tox*/, uint32_t friend_number,
@@ -875,11 +968,8 @@ void ToxAdapter::on_friend_lossless_packet_cb(Tox* /*tox*/, uint32_t friend_numb
 
     util::Logger::trace("Lossless packet from friend {}: {} bytes",
                         friend_number, length);
-
-    std::lock_guard<std::mutex> lock(self->callback_mutex_);
-    if (self->on_lossless_packet_) {
-        self->on_lossless_packet_(friend_number, data, length);
-    }
+    self->enqueue_event(FriendLosslessPacketEvent{
+        friend_number, std::vector<uint8_t>(data, data + length)});
 }
 
 void ToxAdapter::on_friend_lossy_packet_cb(Tox* /*tox*/, uint32_t friend_number,
@@ -889,11 +979,8 @@ void ToxAdapter::on_friend_lossy_packet_cb(Tox* /*tox*/, uint32_t friend_number,
 
     util::Logger::trace("Lossy packet from friend {}: {} bytes",
                         friend_number, length);
-
-    std::lock_guard<std::mutex> lock(self->callback_mutex_);
-    if (self->on_lossy_packet_) {
-        self->on_lossy_packet_(friend_number, data, length);
-    }
+    self->enqueue_event(FriendLossyPacketEvent{
+        friend_number, std::vector<uint8_t>(data, data + length)});
 }
 
 void ToxAdapter::on_friend_message_cb(Tox* /*tox*/, uint32_t friend_number,
@@ -905,11 +992,7 @@ void ToxAdapter::on_friend_message_cb(Tox* /*tox*/, uint32_t friend_number,
     std::string_view msg(reinterpret_cast<const char*>(message), length);
 
     util::Logger::debug("Message from friend {}: '{}'", friend_number, msg);
-
-    std::lock_guard<std::mutex> lock(self->callback_mutex_);
-    if (self->on_friend_message_) {
-        self->on_friend_message_(friend_number, msg);
-    }
+    self->enqueue_event(FriendMessageEvent{friend_number, std::string(msg)});
 }
 
 void ToxAdapter::on_self_connection_status_cb(Tox* /*tox*/,
@@ -929,11 +1012,7 @@ void ToxAdapter::on_self_connection_status_cb(Tox* /*tox*/,
     util::Logger::info("Self connection status: {} ({})",
                        connected ? "connected" : "disconnected",
                        type_str);
-
-    std::lock_guard<std::mutex> lock(self->callback_mutex_);
-    if (self->on_self_connection_) {
-        self->on_self_connection_(connected);
-    }
+    self->enqueue_event(SelfConnectionEvent{connected});
 }
 
 }  // namespace toxtunnel::tox

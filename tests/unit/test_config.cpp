@@ -108,6 +108,35 @@ logging:
     EXPECT_EQ(*config.logging.file, "/var/log/toxtunnel.log");
 }
 
+TEST_F(ConfigTest, ParseNestedServerConfig) {
+    const char* yaml = R"(
+mode: server
+data_dir: /var/lib/toxtunnel
+logging:
+  level: info
+server:
+  tcp_port: 33445
+  udp_enabled: true
+  bootstrap_nodes:
+    - address: bootstrap.tox.me
+      port: 33445
+      public_key: 0000000000000000000000000000000000000000000000000000000000000000
+  rules_file: /etc/toxtunnel/rules.conf
+)";
+
+    auto result = Config::from_string(yaml);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const auto& config = result.value();
+    ASSERT_TRUE(config.server.has_value());
+    EXPECT_EQ(config.server->tcp_port, 33445);
+    EXPECT_TRUE(config.server->udp_enabled);
+    ASSERT_EQ(config.server->bootstrap_nodes.size(), 1);
+    EXPECT_EQ(config.server->bootstrap_nodes[0].address, "bootstrap.tox.me");
+    ASSERT_TRUE(config.server->rules_file.has_value());
+    EXPECT_EQ(*config.server->rules_file, "/etc/toxtunnel/rules.conf");
+}
+
 TEST_F(ConfigTest, ParseFullClientConfig) {
     const char* yaml = R"(
 mode: client
@@ -142,6 +171,36 @@ logging:
     EXPECT_EQ(config.client->forwards[1].remote_host, "192.168.1.100");
     EXPECT_EQ(config.client->forwards[1].remote_port, 80);
 
+    EXPECT_EQ(config.logging.level, util::LogLevel::Debug);
+}
+
+TEST_F(ConfigTest, ParseNestedClientConfig) {
+    const char* yaml = R"(
+mode: client
+data_dir: ~/.config/toxtunnel
+logging:
+  level: debug
+client:
+  server_id: 0000000000000000000000000000000000000000000000000000000000000000000000000000
+  forwards:
+    - local_port: 2222
+      remote_host: localhost
+      remote_port: 22
+    - local_port: 8080
+      remote_host: 192.168.1.100
+      remote_port: 80
+)";
+
+    auto result = Config::from_string(yaml);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const auto& config = result.value();
+    ASSERT_TRUE(config.client.has_value());
+    EXPECT_EQ(config.client->server_id,
+              "0000000000000000000000000000000000000000000000000000000000000000000000000000");
+    ASSERT_EQ(config.client->forwards.size(), 2);
+    EXPECT_EQ(config.client->forwards[0].local_port, 2222);
+    EXPECT_EQ(config.client->forwards[1].remote_port, 80);
     EXPECT_EQ(config.logging.level, util::LogLevel::Debug);
 }
 
@@ -431,6 +490,7 @@ TEST_F(ConfigTest, ToYamlServer) {
     std::string yaml = config.to_yaml();
     EXPECT_TRUE(yaml.find("mode: server") != std::string::npos);
     EXPECT_TRUE(yaml.find("data_dir: /test/path") != std::string::npos);
+    EXPECT_TRUE(yaml.find("server:") != std::string::npos);
     EXPECT_TRUE(yaml.find("tcp_port: 12345") != std::string::npos);
     EXPECT_TRUE(yaml.find("udp_enabled: false") != std::string::npos);
     EXPECT_TRUE(yaml.find("level: debug") != std::string::npos);
@@ -446,6 +506,7 @@ TEST_F(ConfigTest, ToYamlClient) {
     std::string yaml = config.to_yaml();
     EXPECT_TRUE(yaml.find("mode: client") != std::string::npos);
     EXPECT_TRUE(yaml.find("data_dir: /client/path") != std::string::npos);
+    EXPECT_TRUE(yaml.find("client:") != std::string::npos);
     EXPECT_TRUE(yaml.find("server_id:") != std::string::npos);
     EXPECT_TRUE(yaml.find("forwards:") != std::string::npos);
     EXPECT_TRUE(yaml.find("local_port: 2222") != std::string::npos);

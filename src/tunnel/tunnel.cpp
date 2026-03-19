@@ -6,6 +6,15 @@
 
 namespace toxtunnel::tunnel {
 
+namespace {
+
+// tox custom lossless packets max out at 1373 bytes. Our tunnel framing adds
+// a 1-byte tox packet prefix and a 5-byte tunnel frame header, leaving 1367
+// bytes for raw TCP payload per frame.
+constexpr std::size_t kMaxTcpPayloadPerToxFrame = 1367;
+
+}  // namespace
+
 // ===========================================================================
 // to_string(Tunnel::State)
 // ===========================================================================
@@ -394,9 +403,13 @@ bool TunnelImpl::send_data_to_tox(std::span<const uint8_t> data) {
     // Update statistics
     total_bytes_sent_.fetch_add(data_size, std::memory_order_relaxed);
 
-    // Send TUNNEL_DATA frame
-    auto frame = ProtocolFrame::make_tunnel_data(tunnel_id_, data);
-    send_frame_to_tox(frame);
+    for (std::size_t offset = 0; offset < data.size(); offset += kMaxTcpPayloadPerToxFrame) {
+        const auto chunk_size =
+            std::min(kMaxTcpPayloadPerToxFrame, data.size() - offset);
+        auto frame = ProtocolFrame::make_tunnel_data(
+            tunnel_id_, data.subspan(offset, chunk_size));
+        send_frame_to_tox(frame);
+    }
 
     return true;
 }

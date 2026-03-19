@@ -41,7 +41,7 @@ class Logger {
     // Initialisation & configuration
     // -----------------------------------------------------------------
 
-    /// Initialise the global logger with a console (stdout) sink.
+    /// Initialise the global logger with a console (stderr) sink.
     /// Must be called once before any logging.
     /// @param name  Logger name shown in log output.
     static void init(std::string_view name = "toxtunnel");

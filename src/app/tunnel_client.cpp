@@ -5,7 +5,13 @@
 #include "toxtunnel/tunnel/tunnel.hpp"
 #include "toxtunnel/util/logger.hpp"
 
+#include <cstdio>
 #include <span>
+#include <thread>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 namespace toxtunnel::app {
 
@@ -62,16 +68,21 @@ util::Expected<void, std::string> TunnelClient::initialize(const Config& config)
                                 tox_id_result.error());
     }
 
+    auto peer_public_key = tox_id_result.value().public_key();
     auto friend_result = tox_adapter_->add_friend(tox_id_result.value(), "toxtunnel client");
     if (!friend_result) {
+        auto existing_friend = tox_adapter_->friend_by_public_key(peer_public_key);
+        if (existing_friend) {
+            server_friend_number_ = existing_friend.value();
+        } else {
         // The friend may already exist; try adding by public key without request
-        auto pk = tox_id_result.value().public_key();
-        auto noreq_result = tox_adapter_->add_friend_norequest(pk);
-        if (!noreq_result) {
-            return util::unexpected(
-                std::string("Failed to add server as friend: ") + friend_result.error());
+            auto noreq_result = tox_adapter_->add_friend_norequest(peer_public_key);
+            if (!noreq_result) {
+                return util::unexpected(
+                    std::string("Failed to add server as friend: ") + noreq_result.error());
+            }
+            server_friend_number_ = noreq_result.value();
         }
-        server_friend_number_ = noreq_result.value();
     } else {
         server_friend_number_ = friend_result.value();
     }
@@ -113,18 +124,25 @@ void TunnelClient::start() {
     auto address = tox_adapter_->get_address();
     util::Logger::info("Client Tox ID: {}", address.to_hex());
 
-    // Start all TCP listeners
-    for (std::size_t i = 0; i < listeners_.size(); ++i) {
-        const auto& rule = forward_rules_[i];
-        auto& listener = listeners_[i];
+    if (is_pipe_mode()) {
+        util::Logger::info("Client running in stdio pipe mode");
+        if (server_online_) {
+            io_ctx_->post([this] { start_pipe_mode(); });
+        }
+    } else {
+        // Start all TCP listeners
+        for (std::size_t i = 0; i < listeners_.size(); ++i) {
+            const auto& rule = forward_rules_[i];
+            auto& listener = listeners_[i];
 
-        listener->start_accept(
-            [this, &rule](std::shared_ptr<core::TcpConnection> conn) {
-                on_tcp_connection_accepted(std::move(conn), rule);
-            });
+            listener->start_accept(
+                [this, &rule](std::shared_ptr<core::TcpConnection> conn) {
+                    on_tcp_connection_accepted(std::move(conn), rule);
+                });
 
-        util::Logger::info("Listening on local port {} -> {}:{}",
-                           rule.local_port, rule.remote_host, rule.remote_port);
+            util::Logger::info("Listening on local port {} -> {}:{}",
+                               rule.local_port, rule.remote_host, rule.remote_port);
+        }
     }
 }
 
@@ -140,6 +158,11 @@ void TunnelClient::stop() {
         listener->stop();
     }
 
+    if (pipe_bridge_) {
+        pipe_bridge_->stop();
+        pipe_bridge_.reset();
+    }
+
     // Close all tunnels
     tunnel_mgr_->close_all();
 
@@ -150,12 +173,18 @@ void TunnelClient::stop() {
     io_ctx_->stop();
 
     running_ = false;
+    stop_cv_.notify_all();
 
     util::Logger::info("TunnelClient stopped");
 }
 
 bool TunnelClient::is_running() const noexcept {
     return running_.load(std::memory_order_acquire);
+}
+
+void TunnelClient::wait_until_stopped() {
+    std::unique_lock<std::mutex> lock(stop_mutex_);
+    stop_cv_.wait(lock, [this] { return !running_.load(std::memory_order_acquire); });
 }
 
 // -------------------------------------------------------------------------
@@ -178,8 +207,14 @@ void TunnelClient::setup_tox_callbacks() {
                 server_online_ = connected;
                 if (connected) {
                     util::Logger::info("Server friend {} is now online", friend_number);
+                    if (is_pipe_mode() && running_) {
+                        io_ctx_->post([this] { start_pipe_mode(); });
+                    }
                 } else {
                     util::Logger::warn("Server friend {} went offline", friend_number);
+                    if (is_pipe_mode() && running_) {
+                        request_stop();
+                    }
                 }
             }
         });
@@ -250,6 +285,109 @@ void TunnelClient::create_listeners(const std::vector<ForwardRule>& forwards) {
             io_ctx_->get_io_context(), rule.local_port);
         listeners_.push_back(std::move(listener));
     }
+}
+
+bool TunnelClient::is_pipe_mode() const noexcept {
+    return config_.client.has_value() && config_.client->pipe_target.has_value();
+}
+
+void TunnelClient::start_pipe_mode() {
+    if (!is_pipe_mode() || !server_online_) {
+        return;
+    }
+
+    bool expected = false;
+    if (!pipe_mode_started_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+
+    const auto& target = *config_.client->pipe_target;
+
+#ifdef _WIN32
+    util::Logger::error("Pipe mode is not implemented on Windows");
+    request_stop();
+    return;
+#else
+    pipe_bridge_ = std::make_unique<StdioPipeBridge>(STDIN_FILENO, STDOUT_FILENO);
+#endif
+
+    const uint16_t tunnel_id = tunnel_mgr_->allocate_tunnel_id();
+    auto tunnel = std::make_unique<tunnel::TunnelImpl>(
+        io_ctx_->get_io_context(), tunnel_id, server_friend_number_);
+    auto* tunnel_raw = tunnel.get();
+
+    tunnel->set_on_send_to_tox(
+        [this](std::span<const uint8_t> data) {
+            std::vector<uint8_t> frame_data(data.begin(), data.end());
+            std::vector<uint8_t> packet;
+            packet.reserve(1 + frame_data.size());
+            packet.push_back(0xA0);
+            packet.insert(packet.end(), frame_data.begin(), frame_data.end());
+            (void)tox_adapter_->send_lossless_packet(
+                server_friend_number_, packet.data(), packet.size());
+        });
+
+    tunnel->set_on_data_for_tcp(
+        [this](std::span<const uint8_t> data) {
+            if (pipe_bridge_) {
+                pipe_bridge_->write_output(data);
+            }
+        });
+
+    tunnel->set_on_state_change(
+        [this, tunnel_raw, tunnel_id](tunnel::Tunnel::State new_state) {
+            if (new_state == tunnel::Tunnel::State::Connected) {
+                auto start_result = pipe_bridge_->start(
+                    [tunnel_raw](std::span<const uint8_t> data) {
+                        tunnel_raw->on_tcp_data_received(data.data(), data.size());
+                    },
+                    [tunnel_raw]() {
+                        tunnel_raw->close();
+                    });
+                if (!start_result) {
+                    util::Logger::error("Failed to start stdio pipe bridge for tunnel {}: {}",
+                                        tunnel_id, start_result.error());
+                    tunnel_raw->close();
+                    request_stop();
+                }
+            } else if (new_state == tunnel::Tunnel::State::Error) {
+                if (pipe_bridge_) {
+                    pipe_bridge_->stop();
+                }
+                request_stop();
+            }
+        });
+
+    auto* tunnel_mgr_ptr = tunnel_mgr_.get();
+    tunnel->set_on_close(
+        [this, tunnel_mgr_ptr, tunnel_id]() {
+            if (pipe_bridge_) {
+                pipe_bridge_->stop();
+                pipe_bridge_.reset();
+            }
+            pipe_mode_started_ = false;
+            tunnel_mgr_ptr->remove_tunnel(tunnel_id);
+            request_stop();
+        });
+
+    tunnel_mgr_->add_tunnel(tunnel_id, std::move(tunnel));
+
+    if (!tunnel_raw->open(target.remote_host, target.remote_port)) {
+        util::Logger::error("Failed to open pipe-mode tunnel {} to {}:{}",
+                            tunnel_id, target.remote_host, target.remote_port);
+        tunnel_mgr_->remove_tunnel(tunnel_id);
+        pipe_bridge_.reset();
+        pipe_mode_started_ = false;
+        request_stop();
+        return;
+    }
+
+    util::Logger::info("Pipe mode opening tunnel {} -> {}:{}",
+                       tunnel_id, target.remote_host, target.remote_port);
+}
+
+void TunnelClient::request_stop() {
+    std::thread([this] { stop(); }).detach();
 }
 
 void TunnelClient::on_tcp_connection_accepted(std::shared_ptr<core::TcpConnection> conn,

@@ -1,12 +1,15 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "toxtunnel/core/io_context.hpp"
+#include "toxtunnel/app/stdio_pipe_bridge.hpp"
 #include "toxtunnel/core/tcp_listener.hpp"
 #include "toxtunnel/tox/tox_adapter.hpp"
 #include "toxtunnel/tunnel/tunnel_manager.hpp"
@@ -67,6 +70,9 @@ class TunnelClient {
     /// Return true if the client is currently running.
     [[nodiscard]] bool is_running() const noexcept;
 
+    /// Block until stop() has completed.
+    void wait_until_stopped();
+
     // -----------------------------------------------------------------
     // Accessors
     // -----------------------------------------------------------------
@@ -92,6 +98,15 @@ class TunnelClient {
     void on_tcp_connection_accepted(std::shared_ptr<core::TcpConnection> conn,
                                     const ForwardRule& rule);
 
+    /// Return true if the client is configured for stdio pipe mode.
+    [[nodiscard]] bool is_pipe_mode() const noexcept;
+
+    /// Open the single stdio-backed tunnel used by pipe mode.
+    void start_pipe_mode();
+
+    /// Stop the client from a callback without blocking the current thread.
+    void request_stop();
+
     // -----------------------------------------------------------------
     // Data members
     // -----------------------------------------------------------------
@@ -108,6 +123,9 @@ class TunnelClient {
     /// One TCP listener per forwarding rule.
     std::vector<std::unique_ptr<core::TcpListener>> listeners_;
 
+    /// Optional stdio bridge used in pipe mode.
+    std::unique_ptr<StdioPipeBridge> pipe_bridge_;
+
     /// Forwarding rules from configuration (parallel with listeners_).
     std::vector<ForwardRule> forward_rules_;
 
@@ -119,6 +137,12 @@ class TunnelClient {
 
     /// Whether the client is running.
     std::atomic<bool> running_{false};
+
+    /// Whether the pipe-mode tunnel has already been started.
+    std::atomic<bool> pipe_mode_started_{false};
+
+    mutable std::mutex stop_mutex_;
+    std::condition_variable stop_cv_;
 
     /// Stored configuration.
     Config config_;

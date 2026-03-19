@@ -58,8 +58,8 @@ void Logger::init(std::string_view name) {
     g_logger_name = std::string(name);
     g_sinks.clear();
 
-    // Default sink: coloured stdout.
-    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    // Default sink: coloured stderr so stdout can safely carry tunneled data.
+    auto console_sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
     g_sinks.push_back(console_sink);
 
     rebuild_logger_locked();

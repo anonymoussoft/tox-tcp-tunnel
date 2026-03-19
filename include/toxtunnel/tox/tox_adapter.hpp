@@ -14,6 +14,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace toxtunnel::tox {
@@ -354,6 +355,17 @@ class ToxAdapter {
     /// @return true on success, false on I/O failure.
     bool save() const;
 
+    // -----------------------------------------------------------------
+    // Testing hooks
+    // -----------------------------------------------------------------
+
+    /// Queue a friend request event without invoking toxcore.
+    void enqueue_friend_request_for_test(const PublicKeyArray& public_key,
+                                         std::string_view message);
+
+    /// Drain queued callback events. Intended for tests.
+    void dispatch_pending_events_for_test();
+
    private:
     // -----------------------------------------------------------------
     // Internal helpers
@@ -375,6 +387,12 @@ class ToxAdapter {
 
     /// Return the full path to the save file.
     [[nodiscard]] std::filesystem::path save_file_path() const;
+
+    /// Drain queued callback events outside toxcore locks.
+    void dispatch_pending_events();
+
+    template <typename Event>
+    void enqueue_event(Event&& event);
 
     // -----------------------------------------------------------------
     // Static toxcore callback trampolines
@@ -430,6 +448,45 @@ class ToxAdapter {
     /// Whether the node is currently connected to the DHT.
     std::atomic<bool> connected_{false};
 
+    struct FriendRequestEvent {
+        PublicKeyArray public_key{};
+        std::string message;
+    };
+
+    struct FriendConnectionEvent {
+        uint32_t friend_number = 0;
+        bool connected = false;
+    };
+
+    struct FriendLosslessPacketEvent {
+        uint32_t friend_number = 0;
+        std::vector<uint8_t> data;
+    };
+
+    struct FriendLossyPacketEvent {
+        uint32_t friend_number = 0;
+        std::vector<uint8_t> data;
+    };
+
+    struct FriendMessageEvent {
+        uint32_t friend_number = 0;
+        std::string message;
+    };
+
+    struct SelfConnectionEvent {
+        bool connected = false;
+    };
+
+    using CallbackEvent = std::variant<FriendRequestEvent,
+                                       FriendConnectionEvent,
+                                       FriendLosslessPacketEvent,
+                                       FriendLossyPacketEvent,
+                                       FriendMessageEvent,
+                                       SelfConnectionEvent>;
+
+    mutable std::mutex event_mutex_;
+    std::vector<CallbackEvent> pending_events_;
+
     // Callback storage (guarded by callback_mutex_).
     mutable std::mutex callback_mutex_;
     FriendRequestCallback on_friend_request_;
@@ -439,5 +496,11 @@ class ToxAdapter {
     FriendMessageCallback on_friend_message_;
     SelfConnectionCallback on_self_connection_;
 };
+
+template <typename Event>
+void ToxAdapter::enqueue_event(Event&& event) {
+    std::lock_guard<std::mutex> lock(event_mutex_);
+    pending_events_.emplace_back(std::forward<Event>(event));
+}
 
 }  // namespace toxtunnel::tox

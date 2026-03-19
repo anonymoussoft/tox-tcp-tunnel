@@ -70,6 +70,29 @@ util::Expected<tox::BootstrapNode, std::string> BootstrapNodeConfig::to_bootstra
     return node;
 }
 
+util::Expected<PipeTarget, std::string> parse_pipe_target(std::string_view spec) {
+    const auto colon = spec.rfind(':');
+    if (colon == std::string_view::npos || colon == 0 || colon == spec.size() - 1) {
+        return util::make_unexpected(std::string("Pipe target must be in the form host:port"));
+    }
+
+    PipeTarget target;
+    target.remote_host = std::string(spec.substr(0, colon));
+
+    try {
+        const auto port_str = std::string(spec.substr(colon + 1));
+        const auto parsed = std::stoul(port_str);
+        if (parsed == 0 || parsed > 65535) {
+            return util::make_unexpected(std::string("Pipe target port must be between 1 and 65535"));
+        }
+        target.remote_port = static_cast<uint16_t>(parsed);
+    } catch (const std::exception&) {
+        return util::make_unexpected(std::string("Pipe target port must be numeric"));
+    }
+
+    return target;
+}
+
 // ---------------------------------------------------------------------------
 // Config factory methods
 // ---------------------------------------------------------------------------
@@ -186,6 +209,15 @@ util::Expected<void, std::string> Config::validate() const {
                 return util::make_unexpected(std::string("Forward rule remote_port cannot be 0"));
             }
         }
+
+        if (client->pipe_target.has_value()) {
+            if (client->pipe_target->remote_host.empty()) {
+                return util::make_unexpected(std::string("Pipe target remote_host cannot be empty"));
+            }
+            if (client->pipe_target->remote_port == 0) {
+                return util::make_unexpected(std::string("Pipe target remote_port cannot be 0"));
+            }
+        }
     }
 
     return {};
@@ -250,6 +282,9 @@ void Config::merge_cli_overrides(const Config& overrides) {
         if (!overrides.client->forwards.empty()) {
             client->forwards = overrides.client->forwards;
         }
+        if (overrides.client->pipe_target.has_value()) {
+            client->pipe_target = overrides.client->pipe_target;
+        }
     }
 }
 
@@ -288,6 +323,7 @@ std::string Config::to_yaml() const {
 
     // Server config
     if (server) {
+        out << YAML::Key << "server" << YAML::Value << YAML::BeginMap;
         out << YAML::Key << "tcp_port" << YAML::Value << server->tcp_port;
         out << YAML::Key << "udp_enabled" << YAML::Value << server->udp_enabled;
         if (!server->bootstrap_nodes.empty()) {
@@ -305,12 +341,20 @@ std::string Config::to_yaml() const {
         if (server->rules_file) {
             out << YAML::Key << "rules_file" << YAML::Value << *server->rules_file;
         }
+        out << YAML::EndMap;
     }
 
     // Client config
     if (client) {
+        out << YAML::Key << "client" << YAML::Value << YAML::BeginMap;
         if (!client->server_id.empty()) {
             out << YAML::Key << "server_id" << YAML::Value << client->server_id;
+        }
+        if (client->pipe_target.has_value()) {
+            out << YAML::Key << "pipe" << YAML::Value << YAML::BeginMap;
+            out << YAML::Key << "remote_host" << YAML::Value << client->pipe_target->remote_host;
+            out << YAML::Key << "remote_port" << YAML::Value << client->pipe_target->remote_port;
+            out << YAML::EndMap;
         }
         if (!client->forwards.empty()) {
             out << YAML::Key << "forwards";
@@ -324,6 +368,7 @@ std::string Config::to_yaml() const {
             }
             out << YAML::EndSeq;
         }
+        out << YAML::EndMap;
     }
 
     out << YAML::EndMap;
@@ -371,6 +416,7 @@ const ClientConfig& Config::client_config() const {
 namespace YAML {
 
 using toxtunnel::ForwardRule;
+using toxtunnel::PipeTarget;
 using toxtunnel::BootstrapNodeConfig;
 using toxtunnel::LoggingConfig;
 using toxtunnel::ServerConfig;
@@ -378,6 +424,40 @@ using toxtunnel::ClientConfig;
 using toxtunnel::Mode;
 using toxtunnel::Config;
 using toxtunnel::tox::kPublicKeyHexLen;
+
+// ---------------------------------------------------------------------------
+// PipeTarget
+// ---------------------------------------------------------------------------
+
+Node convert<PipeTarget>::encode(const PipeTarget& rhs) {
+    Node node;
+    node["remote_host"] = rhs.remote_host;
+    node["remote_port"] = rhs.remote_port;
+    return node;
+}
+
+bool convert<PipeTarget>::decode(const Node& node, PipeTarget& rhs) {
+    if (node.IsScalar()) {
+        auto result = toxtunnel::parse_pipe_target(node.as<std::string>());
+        if (!result) {
+            return false;
+        }
+        rhs = result.value();
+        return true;
+    }
+
+    if (!node.IsMap()) {
+        return false;
+    }
+
+    if (!node["remote_host"] || !node["remote_port"]) {
+        return false;
+    }
+
+    rhs.remote_host = node["remote_host"].as<std::string>();
+    rhs.remote_port = node["remote_port"].as<uint16_t>();
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // ForwardRule
@@ -528,6 +608,9 @@ bool convert<ServerConfig>::decode(const Node& node, ServerConfig& rhs) {
 Node convert<ClientConfig>::encode(const ClientConfig& rhs) {
     Node node;
     node["server_id"] = rhs.server_id;
+    if (rhs.pipe_target.has_value()) {
+        node["pipe"] = *rhs.pipe_target;
+    }
     if (!rhs.forwards.empty()) {
         node["forwards"] = rhs.forwards;
     }
@@ -541,6 +624,10 @@ bool convert<ClientConfig>::decode(const Node& node, ClientConfig& rhs) {
 
     if (node["server_id"]) {
         rhs.server_id = node["server_id"].as<std::string>();
+    }
+
+    if (node["pipe"]) {
+        rhs.pipe_target = node["pipe"].as<PipeTarget>();
     }
 
     if (node["forwards"]) {
@@ -631,23 +718,30 @@ Node convert<Config>::encode(const Config& rhs) {
     node["logging"] = rhs.logging;
 
     if (rhs.server) {
-        node["tcp_port"] = rhs.server->tcp_port;
-        node["udp_enabled"] = rhs.server->udp_enabled;
+        Node server_node;
+        server_node["tcp_port"] = rhs.server->tcp_port;
+        server_node["udp_enabled"] = rhs.server->udp_enabled;
         if (!rhs.server->bootstrap_nodes.empty()) {
-            node["bootstrap_nodes"] = rhs.server->bootstrap_nodes;
+            server_node["bootstrap_nodes"] = rhs.server->bootstrap_nodes;
         }
         if (rhs.server->rules_file) {
-            node["rules_file"] = *rhs.server->rules_file;
+            server_node["rules_file"] = *rhs.server->rules_file;
         }
+        node["server"] = std::move(server_node);
     }
 
     if (rhs.client) {
+        Node client_node;
         if (!rhs.client->server_id.empty()) {
-            node["server_id"] = rhs.client->server_id;
+            client_node["server_id"] = rhs.client->server_id;
+        }
+        if (rhs.client->pipe_target.has_value()) {
+            client_node["pipe"] = *rhs.client->pipe_target;
         }
         if (!rhs.client->forwards.empty()) {
-            node["forwards"] = rhs.client->forwards;
+            client_node["forwards"] = rhs.client->forwards;
         }
+        node["client"] = std::move(client_node);
     }
 
     return node;
@@ -677,32 +771,38 @@ bool convert<Config>::decode(const Node& node, Config& rhs) {
     // Mode-specific config
     if (rhs.mode == Mode::Server) {
         rhs.server = ServerConfig{};
+        Node server_node = node["server"] ? node["server"] : node;
 
-        if (node["tcp_port"]) {
-            rhs.server->tcp_port = node["tcp_port"].as<uint16_t>();
+        if (server_node["tcp_port"]) {
+            rhs.server->tcp_port = server_node["tcp_port"].as<uint16_t>();
         }
 
-        if (node["udp_enabled"]) {
-            rhs.server->udp_enabled = node["udp_enabled"].as<bool>();
+        if (server_node["udp_enabled"]) {
+            rhs.server->udp_enabled = server_node["udp_enabled"].as<bool>();
         }
 
-        if (node["bootstrap_nodes"]) {
+        if (server_node["bootstrap_nodes"]) {
             rhs.server->bootstrap_nodes =
-                node["bootstrap_nodes"].as<std::vector<BootstrapNodeConfig>>();
+                server_node["bootstrap_nodes"].as<std::vector<BootstrapNodeConfig>>();
         }
 
-        if (node["rules_file"]) {
-            rhs.server->rules_file = node["rules_file"].as<std::string>();
+        if (server_node["rules_file"]) {
+            rhs.server->rules_file = server_node["rules_file"].as<std::string>();
         }
     } else {  // Client mode
         rhs.client = ClientConfig{};
+        Node client_node = node["client"] ? node["client"] : node;
 
-        if (node["server_id"]) {
-            rhs.client->server_id = node["server_id"].as<std::string>();
+        if (client_node["server_id"]) {
+            rhs.client->server_id = client_node["server_id"].as<std::string>();
         }
 
-        if (node["forwards"]) {
-            rhs.client->forwards = node["forwards"].as<std::vector<ForwardRule>>();
+        if (client_node["pipe"]) {
+            rhs.client->pipe_target = client_node["pipe"].as<PipeTarget>();
+        }
+
+        if (client_node["forwards"]) {
+            rhs.client->forwards = client_node["forwards"].as<std::vector<ForwardRule>>();
         }
     }
 

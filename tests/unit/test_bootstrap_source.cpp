@@ -1,0 +1,116 @@
+#include <gtest/gtest.h>
+
+#include <filesystem>
+#include <fstream>
+#include <vector>
+
+#include "toxtunnel/tox/bootstrap_source.hpp"
+
+namespace toxtunnel::tox {
+namespace {
+
+class BootstrapSourceTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        temp_dir_ = std::filesystem::temp_directory_path() / "toxtunnel_bootstrap_source_test";
+        std::filesystem::remove_all(temp_dir_);
+        std::filesystem::create_directories(temp_dir_);
+    }
+
+    void TearDown() override {
+        std::filesystem::remove_all(temp_dir_);
+    }
+
+    void write_cache(const std::string& json) {
+        const auto cache_path = BootstrapSource::cache_file_path(temp_dir_);
+        std::filesystem::create_directories(cache_path.parent_path());
+        std::ofstream out(cache_path);
+        out << json;
+    }
+
+    std::filesystem::path temp_dir_;
+};
+
+TEST_F(BootstrapSourceTest, ParseNodesJsonPrefersOnlineUdpNodes) {
+    const std::string json = R"({
+  "nodes": [
+    {
+      "ipv4": "203.0.113.10",
+      "port": 33445,
+      "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "status_udp": true,
+      "status_tcp": true
+    },
+    {
+      "ipv4": "203.0.113.20",
+      "port": 33445,
+      "public_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "status_udp": false,
+      "status_tcp": true
+    },
+    {
+      "ipv6": "2001:db8::1234",
+      "port": 33445,
+      "public_key": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      "status_udp": true,
+      "status_tcp": false
+    }
+  ]
+})";
+
+    auto result = BootstrapSource::parse_nodes_json(json, 8);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const auto& nodes = result.value();
+    ASSERT_EQ(nodes.size(), 2u);
+    EXPECT_EQ(nodes[0].ip, "203.0.113.10");
+    EXPECT_EQ(nodes[1].ip, "2001:db8::1234");
+}
+
+TEST_F(BootstrapSourceTest, ResolveBootstrapNodesUsesExplicitNodesWithoutFetching) {
+    const auto explicit_pk = parse_public_key(
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD");
+    ASSERT_TRUE(explicit_pk.has_value()) << explicit_pk.error();
+
+    std::vector<BootstrapNode> configured = {
+        BootstrapNode{"198.51.100.42", 33445, explicit_pk.value()}
+    };
+
+    bool fetch_called = false;
+    auto result = BootstrapSource::resolve_bootstrap_nodes(
+        configured, temp_dir_,
+        [&fetch_called]() -> util::Expected<std::string, BootstrapFetchError> {
+            fetch_called = true;
+            return util::unexpected(BootstrapFetchError{std::string("should not fetch")});
+        });
+
+    ASSERT_TRUE(result.has_value()) << result.error();
+    ASSERT_EQ(result.value().size(), 1u);
+    EXPECT_EQ(result.value()[0].ip, "198.51.100.42");
+    EXPECT_FALSE(fetch_called);
+}
+
+TEST_F(BootstrapSourceTest, ResolveBootstrapNodesFallsBackToCacheWhenFetchFails) {
+    write_cache(R"([
+  {
+    "ipv4": "203.0.113.30",
+    "port": 33445,
+    "public_key": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+    "status_udp": true,
+    "status_tcp": true
+  }
+])");
+
+    auto result = BootstrapSource::resolve_bootstrap_nodes(
+        {}, temp_dir_,
+        []() -> util::Expected<std::string, BootstrapFetchError> {
+            return util::unexpected(BootstrapFetchError{std::string("network down")});
+        });
+
+    ASSERT_TRUE(result.has_value()) << result.error();
+    ASSERT_EQ(result.value().size(), 1u);
+    EXPECT_EQ(result.value()[0].ip, "203.0.113.30");
+}
+
+}  // namespace
+}  // namespace toxtunnel::tox

@@ -31,6 +31,17 @@ struct ForwardRule {
     }
 };
 
+/// Represents a pipe-mode target for client stdio forwarding.
+struct PipeTarget {
+    std::string remote_host;      ///< Remote host to connect to
+    uint16_t remote_port = 0;     ///< Remote port to connect to
+
+    bool operator==(const PipeTarget& other) const {
+        return remote_host == other.remote_host &&
+               remote_port == other.remote_port;
+    }
+};
+
 /// Represents a DHT bootstrap node configuration (YAML-friendly).
 struct BootstrapNodeConfig {
     std::string address;          ///< Hostname or IP address
@@ -81,11 +92,18 @@ struct ServerConfig {
 struct ClientConfig {
     std::string server_id;                    ///< Server's Tox ID (76 hex chars)
     std::vector<ForwardRule> forwards;        ///< Port forwarding rules
+    std::optional<PipeTarget> pipe_target;    ///< Optional stdio pipe target
 
     bool operator==(const ClientConfig& other) const {
-        return server_id == other.server_id && forwards == other.forwards;
+        return server_id == other.server_id &&
+               forwards == other.forwards &&
+               pipe_target == other.pipe_target;
     }
 };
+
+/// Parse a pipe target of the form "host:port".
+[[nodiscard]] util::Expected<PipeTarget, std::string> parse_pipe_target(
+    std::string_view spec);
 
 // ---------------------------------------------------------------------------
 // Main configuration
@@ -209,6 +227,12 @@ template <>
 struct convert<toxtunnel::ForwardRule> {
     static Node encode(const toxtunnel::ForwardRule& rhs);
     static bool decode(const Node& node, toxtunnel::ForwardRule& rhs);
+};
+
+template <>
+struct convert<toxtunnel::PipeTarget> {
+    static Node encode(const toxtunnel::PipeTarget& rhs);
+    static bool decode(const Node& node, toxtunnel::PipeTarget& rhs);
 };
 
 template <>

@@ -11,6 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Options
 option(TOXTUNNEL_BUILD_TESTS "Build tests" ON)
 option(TOXTUNNEL_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(TOXTUNNEL_WARNINGS_AS_ERRORS "Treat warnings as errors" ON)
 
 # Sanitizer flags (applied globally since they affect linking too)
 if(NOT MSVC AND TOXTUNNEL_ENABLE_ASAN)
@@ -79,12 +80,14 @@ target_sources(toxtunnel_lib PRIVATE
     src/tunnel/protocol.cpp
     src/tunnel/tunnel.cpp
     src/tunnel/tunnel_manager.cpp
+    src/tox/bootstrap_source.cpp
     src/tox/types.cpp
     src/tox/tox_save.cpp
     src/tox/tox_thread.cpp
     src/tox/tox_connection.cpp
     src/tox/tox_adapter.cpp
     src/app/rules_engine.cpp
+    src/app/stdio_pipe_bridge.cpp
     src/app/tunnel_client.cpp
     src/app/tunnel_server.cpp
     src/util/config.cpp
@@ -106,18 +109,38 @@ target_compile_definitions(toxtunnel_lib PUBLIC
 )
 # Apply strict warnings only to our own library target
 if(MSVC)
-    target_compile_options(toxtunnel_lib PRIVATE /W4 /WX)
+    target_compile_options(toxtunnel_lib PRIVATE /W4)
+    if(TOXTUNNEL_WARNINGS_AS_ERRORS)
+        target_compile_options(toxtunnel_lib PRIVATE /WX)
+    endif()
 else()
-    target_compile_options(toxtunnel_lib PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(toxtunnel_lib PRIVATE -Wall -Wextra -Wpedantic)
+    if(TOXTUNNEL_WARNINGS_AS_ERRORS)
+        target_compile_options(toxtunnel_lib PRIVATE -Werror)
+    endif()
+    # GCC 13+ has false positives for array-bounds in spdlog's fmt bundle
+    # See: https://github.com/fmtlib/fmt/issues/3413
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(toxtunnel_lib PRIVATE -Wno-array-bounds -Wno-stringop-overread)
+    endif()
 endif()
 
 # Executable target
 add_executable(toxtunnel cli/main.cpp)
 target_link_libraries(toxtunnel PRIVATE toxtunnel_lib CLI11::CLI11)
 if(MSVC)
-    target_compile_options(toxtunnel PRIVATE /W4 /WX)
+    target_compile_options(toxtunnel PRIVATE /W4)
+    if(TOXTUNNEL_WARNINGS_AS_ERRORS)
+        target_compile_options(toxtunnel PRIVATE /WX)
+    endif()
 else()
-    target_compile_options(toxtunnel PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(toxtunnel PRIVATE -Wall -Wextra -Wpedantic)
+    if(TOXTUNNEL_WARNINGS_AS_ERRORS)
+        target_compile_options(toxtunnel PRIVATE -Werror)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(toxtunnel PRIVATE -Wno-array-bounds -Wno-stringop-overread)
+    endif()
 endif()
 
 # Tests

@@ -268,6 +268,29 @@ TEST_F(TunnelTest, SendData_QueuesData) {
     EXPECT_GE(tunnel.send_window_used(), test_data.size());
 }
 
+TEST_F(TunnelTest, SendData_SplitsFramesToFitToxCustomPacketLimit) {
+    constexpr std::size_t kMaxTcpPayloadPerFrame = 1367;
+
+    TunnelImpl tunnel(io_ctx, test_tunnel_id, test_friend_number);
+    tunnel.set_state(Tunnel::State::Connected);
+
+    std::vector<ProtocolFrame> sent_frames;
+    tunnel.set_on_send_to_tox([&sent_frames](std::span<const uint8_t> data) {
+        auto frame = ProtocolFrame::deserialize(data);
+        ASSERT_TRUE(frame.has_value()) << frame.error().message();
+        sent_frames.push_back(frame.value());
+    });
+
+    std::vector<uint8_t> payload(kMaxTcpPayloadPerFrame + 128, 0x5A);
+    ASSERT_TRUE(tunnel.send_data_to_tox(payload));
+
+    ASSERT_EQ(sent_frames.size(), 2u);
+    EXPECT_EQ(sent_frames[0].type(), FrameType::TUNNEL_DATA);
+    EXPECT_EQ(sent_frames[0].as_tunnel_data().size(), kMaxTcpPayloadPerFrame);
+    EXPECT_EQ(sent_frames[1].type(), FrameType::TUNNEL_DATA);
+    EXPECT_EQ(sent_frames[1].as_tunnel_data().size(), 128u);
+}
+
 TEST_F(TunnelTest, SendData_RespectsWindow) {
     TunnelImpl tunnel(io_ctx, test_tunnel_id, test_friend_number, 100);  // Small window
     tunnel.set_state(Tunnel::State::Connected);

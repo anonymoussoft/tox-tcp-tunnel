@@ -6,6 +6,7 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include <thread>
 
 #include "toxtunnel/app/tunnel_client.hpp"
 #include "toxtunnel/app/tunnel_server.hpp"
@@ -115,8 +116,15 @@ int run_client(const toxtunnel::Config& config) {
     client.start();
     Logger::info("Client started");
 
-    // Block on signal wait
-    signal_ctx.run();
+    std::thread signal_thread([&signal_ctx] {
+        signal_ctx.run();
+    });
+
+    client.wait_until_stopped();
+    signal_ctx.stop();
+    if (signal_thread.joinable()) {
+        signal_thread.join();
+    }
 
     Logger::info("Client stopped");
     return 0;
@@ -139,6 +147,7 @@ int main(int argc, char* argv[]) {
     std::string log_level_str;
     uint16_t port = 0;
     std::string server_id;
+    std::string pipe_target;
 
     app.add_option("-c,--config", config_path, "Path to YAML config file");
 
@@ -154,6 +163,7 @@ int main(int argc, char* argv[]) {
         ->check(CLI::Range(static_cast<uint16_t>(1), static_cast<uint16_t>(65535)));
 
     app.add_option("--server-id", server_id, "Override server Tox ID (client mode)");
+    app.add_option("--pipe", pipe_target, "Pipe mode target host:port (client mode)");
 
     app.set_version_flag("-v,--version", kVersion);
 
@@ -229,6 +239,19 @@ int main(int argc, char* argv[]) {
             overrides.client = ClientConfig{};
         }
         overrides.client->server_id = server_id;
+        has_overrides = true;
+    }
+
+    if (!pipe_target.empty()) {
+        auto pipe_result = parse_pipe_target(pipe_target);
+        if (!pipe_result) {
+            std::cerr << "Configuration error: " << pipe_result.error() << "\n";
+            return 1;
+        }
+        if (!overrides.client) {
+            overrides.client = ClientConfig{};
+        }
+        overrides.client->pipe_target = pipe_result.value();
         has_overrides = true;
     }
 

@@ -361,6 +361,18 @@ void TunnelServer::handle_tunnel_open(uint32_t friend_number,
         return;
     }
 
+    auto server_tunnel = std::make_unique<tunnel::TunnelImpl>(
+        io_context_->get_io_context(), tunnel_id, friend_number);
+    server_tunnel->set_on_send_to_tox(
+        [manager_ptr](std::span<const uint8_t> data) {
+            auto parsed = tunnel::ProtocolFrame::deserialize(data);
+            if (!parsed) {
+                return;
+            }
+            (void)manager_ptr->send_frame(parsed.value());
+        });
+    manager_ptr->add_tunnel(tunnel_id, std::move(server_tunnel));
+
     // Create a TCP connection to the target host:port.
     auto tcp_conn = std::make_shared<core::TcpConnection>(io_context_->get_io_context());
 
