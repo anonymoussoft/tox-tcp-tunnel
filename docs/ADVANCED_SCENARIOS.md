@@ -143,6 +143,43 @@ sudo systemctl start tox-backup
 
 Access remote desktops securely through ToxTunnel.
 
+### Single-Machine Testing
+
+Test VNC tunneling locally before deploying to two separate machines.
+
+```bash
+# Terminal 1: Install and start VNC server (Linux/macOS)
+# Linux
+sudo apt install tigervnc-standalone-server
+vncpasswd
+vncserver :1 -geometry 1920x1080 -depth 24
+
+# macOS (use built-in Screen Sharing or install TigerVNC)
+# brew install tigervnc
+# System Preferences > Sharing > Screen Sharing > Enable
+
+# Terminal 2: Start ToxTunnel server
+./build/toxtunnel -m server -d /tmp/toxtunnel-server
+```
+
+Copy the server's Tox address.
+
+```bash
+# Terminal 3: Start ToxTunnel client
+SERVER_ID="PASTE_SERVER_TOX_ADDRESS_HERE"
+./build/toxtunnel -m client \
+    --server-id "$SERVER_ID" \
+    --local-port 5901 \
+    --remote-host 127.0.0.1 \
+    --remote-port 5901 \
+    -d /tmp/toxtunnel-client
+
+# Terminal 4: Connect to VNC through tunnel
+vncviewer localhost:1
+# Or with TigerVNC
+vncviewer localhost:5901
+```
+
 ### RDP (Windows Remote Desktop)
 
 #### Remote Machine (Windows Server/Desktop)
@@ -243,6 +280,70 @@ client:
 ## NAS Access
 
 Access Network Attached Storage (NAS) systems through ToxTunnel.
+
+### Single-Machine Testing
+
+Test NAS-like file sharing locally using a simple HTTP file server.
+
+```bash
+# Terminal 1: Create a test directory and start a file server
+mkdir -p /tmp/nas-share
+echo "Test file from NAS" > /tmp/nas-share/readme.txt
+echo "Another file" > /tmp/nas-share/data.txt
+
+# Start a simple HTTP file server
+python3 -m http.server 8080 --directory /tmp/nas-share
+
+# Terminal 2: Start ToxTunnel server
+./build/toxtunnel -m server -d /tmp/toxtunnel-server
+```
+
+Copy the server's Tox address.
+
+```bash
+# Terminal 3: Start ToxTunnel client
+SERVER_ID="PASTE_SERVER_TOX_ADDRESS_HERE"
+./build/toxtunnel -m client \
+    --server-id "$SERVER_ID" \
+    --local-port 8888 \
+    --remote-host 127.0.0.1 \
+    --remote-port 8080 \
+    -d /tmp/toxtunnel-client
+
+# Terminal 4: Access the NAS through tunnel
+curl http://localhost:8888/
+curl http://localhost:8888/readme.txt
+
+# Or open in browser
+open http://localhost:8888
+```
+
+For SSHFS-based testing:
+
+```bash
+# Terminal 1: Ensure SSH server is running
+# Linux: sudo systemctl start ssh
+# macOS: System Preferences > Sharing > Remote Login > Enable
+
+./build/toxtunnel -m server -d /tmp/toxtunnel-server
+
+# Terminal 2: Start client (after getting server Tox ID)
+./build/toxtunnel -m client \
+    --server-id "$SERVER_ID" \
+    --local-port 2222 \
+    --remote-host 127.0.0.1 \
+    --remote-port 22 \
+    -d /tmp/toxtunnel-client
+
+# Terminal 3: Mount via SSHFS
+mkdir -p /tmp/nas-mount
+sshfs -p 2222 $USER@localhost:/tmp/nas-share /tmp/nas-mount
+ls /tmp/nas-mount
+
+# Unmount when done
+# Linux: fusermount -u /tmp/nas-mount
+# macOS: umount /tmp/nas-mount
+```
 
 ### Web Interface Access
 

@@ -47,6 +47,7 @@ gtest_discover_tests(unit_tests)
 # Integration tests
 add_executable(integration_tests
     integration/test_config_pipeline.cpp
+    integration/test_http_scenarios.cpp
     integration/test_pipe_bridge.cpp
     integration/test_rules_integration.cpp
     integration/test_tcp_loopback.cpp

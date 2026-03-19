@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  push:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git pkg-config libsodium-dev
+
+      - name: Clone with submodules
+        run: |
+          git submodule update --init --recursive
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          cmake --build build -j$(nproc)
+
+      - name: Run unit tests
+        working-directory: build
+        run: |
+          ctest --output-on-failure -j$(nproc)
+
+      - name: Run integration tests
+        working-directory: build
+        run: |
+          ctest --output-on-failure -j$(nproc)
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install cmake pkg-config libsodium
+
+      - name: Clone with submodules
+        run: |
+          git submodule update --init --recursive
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          cmake --build build -j$(sysctl -n hw.ncpu)
+
+      - name: Run unit tests
+        working-directory: build
+        run: |
+            ctest --output-on-failure -j$(sysctl -n hw.ncpu)
+
+      - name: Run integration tests
+        working-directory: build
+        run: |
+            ctest --output-on-failure -j$(sysctl -n hw.ncpu)
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          vcpkg install libsodium:x64-windows
+
+      - name: Clone with submodules
+        run: |
+          git submodule update --init --recursive
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+
+      - name: Build
+        run: |
+          cmake --build build --config Release
+
+      - name: Run unit tests
+        working-directory: build
+        run: |
+            ctest --output-on-failure -C Release
+
+      - name: Run integration tests
+        working-directory: build
+        run: |
+            ctest --output-on-failure -C Release
+
+  code-style-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Check code formatting
+        run: |
+          find include src tests -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run --Werror -style=file
+
+  build-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git pkg-config libsodium-dev
+
+      - name: Clone with submodules
+        run: |
+          git submodule update --init --recursive
+
+      - name: Configure CMake (Debug with ASan)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DTOXTUNNEL_ENABLE_ASAN=ON
+
+      - name: Build
+        run: |
+          cmake --build build -j$(nproc)
+
+      - name: Run tests with ASan
+        working-directory: build
+        run: |
+          ctest --output-on-failure -j$(nproc)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
