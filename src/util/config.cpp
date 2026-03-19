@@ -71,9 +71,41 @@ util::Expected<tox::BootstrapNode, std::string> BootstrapNodeConfig::to_bootstra
 }
 
 util::Expected<PipeTarget, std::string> parse_pipe_target(std::string_view spec) {
+    // Handle IPv6 addresses in bracket notation: [host]:port
+    if (!spec.empty() && spec[0] == '[') {
+        const auto bracket_end = spec.find(']');
+        if (bracket_end == std::string_view::npos) {
+            return util::make_unexpected(
+                std::string("Invalid IPv6 address: missing closing bracket"));
+        }
+        if (bracket_end + 1 >= spec.size() || spec[bracket_end + 1] != ':') {
+            return util::make_unexpected(
+                std::string("Pipe target must be in the form [ipv6]:port"));
+        }
+
+        PipeTarget target;
+        target.remote_host = std::string(spec.substr(1, bracket_end - 1));
+
+        try {
+            const auto port_str = std::string(spec.substr(bracket_end + 2));
+            const auto parsed = std::stoul(port_str);
+            if (parsed == 0 || parsed > 65535) {
+                return util::make_unexpected(
+                    std::string("Pipe target port must be between 1 and 65535"));
+            }
+            target.remote_port = static_cast<uint16_t>(parsed);
+        } catch (const std::exception&) {
+            return util::make_unexpected(std::string("Pipe target port must be numeric"));
+        }
+
+        return target;
+    }
+
+    // Handle IPv4 addresses and hostnames: host:port
     const auto colon = spec.rfind(':');
     if (colon == std::string_view::npos || colon == 0 || colon == spec.size() - 1) {
-        return util::make_unexpected(std::string("Pipe target must be in the form host:port"));
+        return util::make_unexpected(
+            std::string("Pipe target must be in the form host:port or [ipv6]:port"));
     }
 
     PipeTarget target;
@@ -83,7 +115,8 @@ util::Expected<PipeTarget, std::string> parse_pipe_target(std::string_view spec)
         const auto port_str = std::string(spec.substr(colon + 1));
         const auto parsed = std::stoul(port_str);
         if (parsed == 0 || parsed > 65535) {
-            return util::make_unexpected(std::string("Pipe target port must be between 1 and 65535"));
+            return util::make_unexpected(
+                std::string("Pipe target port must be between 1 and 65535"));
         }
         target.remote_port = static_cast<uint16_t>(parsed);
     } catch (const std::exception&) {

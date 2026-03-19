@@ -1,0 +1,172 @@
+# Architecture
+
+## Overview
+
+```
++-------------------+
+|    CLI / Config   |    YAML config, CLI11 argument parsing
++-------------------+
+         |
++-------------------+
+| Application Layer |    TunnelServer / TunnelClient / RulesEngine
++-------------------+
+         |
++--------+----------+
+|  TCP   |   Tox    |
+|  I/O   | Protocol |    asio thread pool / dedicated Tox thread
++--------+----------+
+```
+
+## Components
+
+| Component       | Description                                                      |
+| --------------- | ---------------------------------------------------------------- |
+| `TunnelServer`  | Accepts Tox friend connections, forwards to local TCP services   |
+| `TunnelClient`  | Listens on local TCP ports, tunnels through Tox to the server    |
+| `TunnelManager` | Manages multiple concurrent tunnels per friend connection        |
+| `Tunnel`        | State machine for a single bidirectional tunnel                  |
+| `ProtocolFrame` | Binary frame serialization/deserialization                       |
+| `ToxAdapter`    | High-level wrapper for the toxcore C API                         |
+| `ToxThread`     | Dedicated thread for the toxcore event loop                      |
+| `RulesEngine`   | Per-friend access control (allow/deny rules)                     |
+| `IoContext`     | Async I/O thread pool wrapping asio                              |
+| `Config`        | YAML configuration loading, validation, and CLI override merging |
+
+## Protocol
+
+Binary framing over Tox lossless custom packets:
+
+```
+Offset  Size  Field
+------  ----  -----
+0       1     type       (FrameType)
+1       2     tunnel_id  (uint16, big-endian)
+3       2     length     (uint16, big-endian)
+5       N     payload
+```
+
+### Frame Types
+
+| Type           | Value | Description                    |
+| -------------- | ----- | ------------------------------ |
+| `TUNNEL_OPEN`  | 0x01  | Request to open a new tunnel   |
+| `TUNNEL_DATA`  | 0x02  | Data frame                     |
+| `TUNNEL_CLOSE` | 0x03  | Close tunnel gracefully        |
+| `TUNNEL_ACK`   | 0x04  | Acknowledge tunnel open        |
+| `TUNNEL_ERROR` | 0x05  | Error (connect failed, etc.)   |
+| `PING`         | 0x10  | Keep-alive ping                |
+| `PONG`         | 0x11  | Keep-alive response            |
+
+## Threading Model
+
+```
++-------------+     +-------------+     +-------------+
+| Main Thread |---->| Tox Thread  |<--->| Tox Network |
++-------------+     +-------------+     +-------------+
+       |                   ^
+       v                   |
++-------------+     +-------------+
+| I/O Pool    |<--->| Tunnel Mgr  |
+| (10 threads)|     +-------------+
++-------------+
+       ^
+       |
++-------------+
+| TCP Sockets |
++-------------+
+```
+
+- **Main thread**: Signal handling, orchestration
+- **Tox thread**: Single dedicated thread for all toxcore API calls (toxcore is not thread-safe)
+- **I/O pool**: Async TCP operations via asio (default: 10 threads)
+
+## Data Flow
+
+### Client -> Server (Outbound Tunnel)
+
+```
+1. TCP client connects to client's local port (e.g., :2222)
+2. TunnelClient creates Tunnel, sends TUNNEL_OPEN to server
+3. Server's TunnelServer receives TUNNEL_OPEN
+4. Server connects to target (e.g., 127.0.0.1:22)
+5. Server sends TUNNEL_ACK
+6. Bidirectional data flow begins:
+   - TCP data -> TUNNEL_DATA -> Tox -> TUNNEL_DATA -> TCP
+```
+
+### Tunnel Lifecycle
+
+```
+          Client                          Server
+            |                               |
+            |------- TUNNEL_OPEN --------->|
+            |                               |--- connect() --->
+            |<------ TUNNEL_ACK ------------|
+            |                               |
+            |<====== TUNNEL_DATA ==========>|
+            |                               |
+            |------- TUNNEL_CLOSE --------->|  (or <-)
+            |                               |
+```
+
+## Dependencies
+
+| Library                                          | Version | Purpose                                         |
+| ------------------------------------------------ | ------- | ----------------------------------------------- |
+| [c-toxcore](https://github.com/TokTok/c-toxcore) | v0.2.22 | Tox protocol (git submodule, built from source) |
+| [asio](https://github.com/chriskohlhoff/asio)    | 1.28.0  | Async I/O (FetchContent, header-only)           |
+| [spdlog](https://github.com/gabime/spdlog)       | 1.12.0  | Logging (FetchContent)                          |
+| [CLI11](https://github.com/CLIUtils/CLI11)       | 2.3.2   | CLI argument parsing (FetchContent)             |
+| [yaml-cpp](https://github.com/jbeder/yaml-cpp)   | 0.7.0   | YAML parsing (FetchContent)                     |
+| libsodium                                        | system  | Cryptography (required by toxcore)              |
+| [Google Test](https://github.com/google/googletest) | latest | Testing (FetchContent, test builds only)     |
+
+## Project Structure
+
+```
+tox-tcp-tunnel/
+  cli/
+    main.cpp                    # CLI entry point
+  include/toxtunnel/
+    core/                       # Async I/O primitives
+      io_context.hpp
+      tcp_connection.hpp
+      tcp_listener.hpp
+    tox/                        # Tox protocol layer
+      types.hpp
+      tox_adapter.hpp
+      tox_connection.hpp
+      tox_thread.hpp
+      tox_save.hpp
+      bootstrap_source.hpp
+    tunnel/                     # Tunnel protocol
+      protocol.hpp
+      tunnel.hpp
+      tunnel_manager.hpp
+    app/                        # Application logic
+      tunnel_server.hpp
+      tunnel_client.hpp
+      rules_engine.hpp
+      stdio_pipe_bridge.hpp
+    util/                       # Utilities
+      config.hpp
+      logger.hpp
+      error.hpp
+      expected.hpp
+      circular_buffer.hpp
+  src/                          # Implementations (mirrors include/)
+  tests/
+    unit/                       # Unit tests (219 tests)
+    integration/                # Integration tests (29 tests)
+  third_party/
+    c-toxcore/                  # toxcore git submodule
+  docs/                         # Documentation
+```
+
+## Security Considerations
+
+1. **End-to-end encryption**: All traffic is encrypted by Tox using NaCl/libsodium
+2. **No central server**: Direct P2P connection, no MITM risk from server operator
+3. **Access control**: Use `rules_file` to restrict what friends can access
+4. **Identity protection**: Back up `tox_save.dat` (contains private key)
+5. **NAT traversal**: Uses Tox's built-in NAT hole punching, no port forwarding needed

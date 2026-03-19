@@ -387,7 +387,16 @@ void TunnelClient::start_pipe_mode() {
 }
 
 void TunnelClient::request_stop() {
-    std::thread([this] { stop(); }).detach();
+    // Use io_ctx_ to post the stop operation, avoiding detached threads.
+    // This ensures stop() runs on the I/O thread pool and any exceptions
+    // are handled within the asio context.
+    if (io_ctx_ && running_.load()) {
+        io_ctx_->post([this] {
+            if (running_.load()) {
+                stop();
+            }
+        });
+    }
 }
 
 void TunnelClient::on_tcp_connection_accepted(std::shared_ptr<core::TcpConnection> conn,
