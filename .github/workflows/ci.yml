@@ -1,145 +1,222 @@
 name: CI
 
 on:
-  push:
-    branches: [master]
   pull_request:
   push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
+  build-release-matrix:
+    name: Build ${{ matrix.target.id }}
+    runs-on: ${{ matrix.target.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - id: linux-x86_64
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x86_64
+            archive_ext: tar.gz
+          - id: linux-aarch64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            arch: aarch64
+            archive_ext: tar.gz
+          - id: macos-x86_64
+            runner: macos-15-intel
+            platform: macos
+            arch: x86_64
+            archive_ext: tar.gz
+          - id: macos-aarch64
+            runner: macos-15
+            platform: macos
+            arch: aarch64
+            archive_ext: tar.gz
+          - id: windows-x86_64
+            runner: windows-2025
+            platform: windows
+            arch: x86_64
+            archive_ext: zip
+            vcpkg_triplet: x64-windows
+            cmake_arch: x64
+          - id: windows-aarch64
+            runner: windows-11-arm
+            platform: windows
+            arch: aarch64
+            archive_ext: zip
+            vcpkg_triplet: arm64-windows
+            cmake_arch: ARM64
+    env:
+      PACKAGE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('snapshot-{0}', github.sha) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Install dependencies
+      - name: Install Linux dependencies
+        if: matrix.target.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake git pkg-config libsodium-dev
+          sudo apt-get install -y build-essential cmake pkg-config libsodium-dev
 
-      - name: Clone with submodules
-        run: |
-          git submodule update --init --recursive
-
-      - name: Configure CMake
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: |
-          cmake --build build -j$(nproc)
-
-      - name: Run unit tests
-        working-directory: build
-        run: |
-          ctest --output-on-failure -j$(nproc)
-
-      - name: Run integration tests
-        working-directory: build
-        run: |
-          ctest --output-on-failure -j$(nproc)
-
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
+      - name: Install macOS dependencies
+        if: matrix.target.platform == 'macos'
         run: |
           brew install cmake pkg-config libsodium
 
-      - name: Clone with submodules
+      - name: Bootstrap vcpkg
+        if: matrix.target.platform == 'windows'
+        shell: pwsh
         run: |
-          git submodule update --init --recursive
+          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install "libsodium:${{ matrix.target.vcpkg_triplet }}"
 
-      - name: Configure CMake
+      - name: Configure CMake (Unix)
+        if: matrix.target.platform != 'windows'
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build
+      - name: Configure CMake (Windows)
+        if: matrix.target.platform == 'windows'
+        shell: pwsh
         run: |
-          cmake --build build -j$(sysctl -n hw.ncpu)
+          cmake -B build `
+            -G "Visual Studio 17 2022" `
+            -A "${{ matrix.target.cmake_arch }}" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:RUNNER_TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.target.vcpkg_triplet }}"
 
-      - name: Run unit tests
+      - name: Build (Unix)
+        if: matrix.target.platform != 'windows'
+        run: |
+          cmake --build build --parallel
+
+      - name: Build (Windows)
+        if: matrix.target.platform == 'windows'
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Run unit tests (Unix)
+        if: matrix.target.platform != 'windows'
         working-directory: build
         run: |
-            ctest --output-on-failure -j$(sysctl -n hw.ncpu)
+          ctest --output-on-failure -L unit --parallel
 
-      - name: Run integration tests
+      - name: Run unit tests (Windows)
+        if: matrix.target.platform == 'windows'
+        working-directory: build
+        shell: pwsh
+        run: |
+          ctest --output-on-failure -C Release -L unit --parallel
+
+      - name: Run integration tests (Unix)
+        if: matrix.target.platform != 'windows'
         working-directory: build
         run: |
-            ctest --output-on-failure -j$(sysctl -n hw.ncpu)
+          ctest --output-on-failure -L integration --parallel
 
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          vcpkg install libsodium:x64-windows
-
-      - name: Clone with submodules
-        run: |
-          git submodule update --init --recursive
-
-      - name: Configure CMake
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
-
-      - name: Build
-        run: |
-          cmake --build build --config Release
-
-      - name: Run unit tests
+      - name: Run integration tests (Windows)
+        if: matrix.target.platform == 'windows'
         working-directory: build
+        shell: pwsh
         run: |
-            ctest --output-on-failure -C Release
+          ctest --output-on-failure -C Release -L integration --parallel
 
-      - name: Run integration tests
-        working-directory: build
+      - name: Package release artifact (Unix)
+        if: matrix.target.platform != 'windows'
         run: |
-            ctest --output-on-failure -C Release
+          mkdir -p release-artifacts
+          stage_dir="$RUNNER_TEMP/toxtunnel-${PACKAGE_VERSION}-${{ matrix.target.id }}"
+          archive_path="release-artifacts/toxtunnel-${PACKAGE_VERSION}-${{ matrix.target.id }}.${{ matrix.target.archive_ext }}"
+          cmake --install build --prefix "$stage_dir" --component toxtunnel-runtime
+          tar -C "$RUNNER_TEMP" -czf "$archive_path" "$(basename "$stage_dir")"
+
+      - name: Package release artifact (Windows)
+        if: matrix.target.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-artifacts | Out-Null
+          $stageDir = Join-Path $env:RUNNER_TEMP "toxtunnel-$env:PACKAGE_VERSION-${{ matrix.target.id }}"
+          $archivePath = Join-Path $PWD "release-artifacts/toxtunnel-$env:PACKAGE_VERSION-${{ matrix.target.id }}.${{ matrix.target.archive_ext }}"
+          cmake --install build --config Release --prefix $stageDir --component toxtunnel-runtime
+          Compress-Archive -Path $stageDir -DestinationPath $archivePath -Force
+
+      - name: Upload packaged artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target.id }}
+          path: release-artifacts/*
+          if-no-files-found: error
 
   code-style-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
       - name: Install clang-format
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format
-
       - name: Check code formatting
         run: |
-          find include src tests -name "*.cpp" -o -name "*.hpp" | xargs clang-format --dry-run --Werror -style=file
+          find include src tests -type f \( -name "*.cpp" -o -name "*.hpp" \) -print0 | \
+            xargs -0 clang-format --dry-run --Werror -style=file
 
   build-debug:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          submodules: recursive
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake git pkg-config libsodium-dev
-
-      - name: Clone with submodules
-        run: |
-          git submodule update --init --recursive
-
+          sudo apt-get install -y build-essential cmake pkg-config libsodium-dev
       - name: Configure CMake (Debug with ASan)
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Debug -DTOXTUNNEL_ENABLE_ASAN=ON
-
       - name: Build
         run: |
-          cmake --build build -j$(nproc)
-
+          cmake --build build --parallel
       - name: Run tests with ASan
         working-directory: build
         run: |
-          ctest --output-on-failure -j$(nproc)
+          ctest --output-on-failure --parallel
         env:
           ASAN_OPTIONS: detect_leaks=0
+
+  publish-release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-release-matrix
+      - code-style-check
+      - build-debug
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          overwrite_files: true

@@ -1,0 +1,60 @@
+name: PR Check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # Check PR title follows conventional commits format
+  pr-title:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check PR title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            chore
+            refactor
+            test
+            ci
+            build
+            perf
+            style
+            deps
+            revert
+            bump
+          requireScope: |
+            subject: must start with one of the prefixes
+          subjectRegex: '^(feat|fix|docs|chore|refactor|test|ci|build|perf|style|deps|revert|bump)(\(.+\))?:\s.+'
+          headerPattern: '^(\w+)(\(.+\))?:\s.+'
+          lowercaseOnly: true
+
+  # Run clang-tidy static analysis
+  clang-tidy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run clang-tidy
+        run: |
+          cd build
+          clang-tidy -p ../src ../include -header-filter='.*' --warnings-as-errors
+        continue-on-error: true

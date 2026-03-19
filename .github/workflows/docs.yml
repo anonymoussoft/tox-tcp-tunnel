@@ -1,0 +1,60 @@
+name: Docs
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'CLAUDE.md'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'CLAUDE.md'
+  workflow_dispatch:
+
+jobs:
+  markdown-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install markdownlint-cli
+        run: npm install -g markdownlint-cli
+
+      - name: Lint markdown files
+        run: |
+          markdownlint README.md CLAUDE.md docs/*.md --disable MD013 MD033 MD034 MD036 MD041 MD045 || true
+        continue-on-error: true
+
+      - name: Check for broken links (internal)
+        run: |
+          # Check internal links in markdown files
+          find docs -name "*.md" -exec grep -l "\[.*\](\./" {} \; | while read file; do
+            dir=$(dirname "$file")
+            grep -oE '\]\(\./[^)]+' "$file" | sed 's/](\///' | while read link; do
+              target="$dir/$link"
+              if [ ! -f "$target" ]; then
+                echo "Warning: Broken link in $file -> $target"
+              fi
+            done
+          done || true
+
+  check-architecture-diagrams:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify ASCII diagrams are valid
+        run: |
+          # Check that ASCII art diagrams in markdown don't have common issues
+          for file in docs/*.md README.md; do
+            if [ -f "$file" ]; then
+              echo "Checking $file for diagram issues..."
+              # Check for tabs in code blocks (can break ASCII art)
+              if grep -Pzo '```[^\n]*\n[^\n]*\t[^\n]*\n```' "$file" > /dev/null; then
+                echo "Warning: Found tabs in code blocks in $file"
+              fi
+            fi
+          done || true
