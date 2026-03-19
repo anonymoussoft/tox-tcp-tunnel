@@ -57,7 +57,7 @@ jobs:
     env:
       PACKAGE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('snapshot-{0}', github.sha) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -154,7 +154,7 @@ jobs:
 
       - name: Upload packaged artifact
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target.id }}
           path: release-artifacts/*
@@ -163,7 +163,7 @@ jobs:
   code-style-check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install clang-format
         run: |
           sudo apt-get update
@@ -176,7 +176,7 @@ jobs:
   build-debug:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
       - name: Install dependencies
@@ -207,7 +207,7 @@ jobs:
       contents: write
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: release-artifacts
