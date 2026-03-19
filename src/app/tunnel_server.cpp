@@ -41,6 +41,7 @@ util::Expected<void, std::string> TunnelServer::initialize(const Config& config)
     }
 
     const auto& server_cfg = config_.server.value();
+    const auto tox_cfg = config_.effective_tox_config();
 
     // Load access rules if a rules file is specified.
     if (server_cfg.rules_file.has_value()) {
@@ -61,11 +62,13 @@ util::Expected<void, std::string> TunnelServer::initialize(const Config& config)
     // Configure ToxAdapter.
     tox::ToxAdapterConfig tox_config;
     tox_config.data_dir = config_.data_dir;
-    tox_config.udp_enabled = server_cfg.udp_enabled;
-    tox_config.tcp_port = server_cfg.tcp_port;
+    tox_config.udp_enabled = tox_cfg.udp_enabled;
+    tox_config.tcp_port = tox_cfg.tcp_port;
+    tox_config.bootstrap_mode = tox_cfg.bootstrap_mode;
+    tox_config.local_discovery_enabled = tox_cfg.bootstrap_mode == BootstrapMode::Lan;
 
     // Convert bootstrap nodes from config format.
-    for (const auto& node_cfg : server_cfg.bootstrap_nodes) {
+    for (const auto& node_cfg : tox_cfg.bootstrap_nodes) {
         auto node_result = node_cfg.to_bootstrap_node();
         if (node_result) {
             tox_config.bootstrap_nodes.push_back(std::move(node_result.value()));

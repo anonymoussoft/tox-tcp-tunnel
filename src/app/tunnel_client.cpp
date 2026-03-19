@@ -42,6 +42,7 @@ util::Expected<void, std::string> TunnelClient::initialize(const Config& config)
 
     config_ = config;
     const auto& client_cfg = config.client_config();
+    const auto tox_cfg = config.effective_tox_config();
 
     // Create IoContext
     io_ctx_ = std::make_unique<core::IoContext>();
@@ -51,9 +52,20 @@ util::Expected<void, std::string> TunnelClient::initialize(const Config& config)
 
     tox::ToxAdapterConfig tox_config;
     tox_config.data_dir = config.data_dir;
-    tox_config.udp_enabled = true;
+    tox_config.udp_enabled = tox_cfg.udp_enabled;
+    tox_config.bootstrap_mode = tox_cfg.bootstrap_mode;
+    tox_config.local_discovery_enabled = tox_cfg.bootstrap_mode == BootstrapMode::Lan;
     tox_config.name = "toxtunnel-client";
     tox_config.status_message = "toxtunnel client node";
+    for (const auto& node_cfg : tox_cfg.bootstrap_nodes) {
+        auto node_result = node_cfg.to_bootstrap_node();
+        if (node_result) {
+            tox_config.bootstrap_nodes.push_back(std::move(node_result.value()));
+        } else {
+            util::Logger::warn("Skipping invalid bootstrap node {}: {}",
+                               node_cfg.address, node_result.error());
+        }
+    }
 
     auto init_result = tox_adapter_->initialize(tox_config);
     if (!init_result) {

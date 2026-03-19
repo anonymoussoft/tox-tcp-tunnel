@@ -32,6 +32,19 @@
 | `IoContext`     | Async I/O thread pool wrapping asio                              |
 | `Config`        | YAML configuration loading, validation, and CLI override merging |
 
+## Configuration Model
+
+ToxTunnel now uses a shared top-level `tox` configuration block for toxcore network settings used
+by both server and client.
+
+- `tox.udp_enabled`
+- `tox.tcp_port`
+- `tox.bootstrap_mode`
+- `tox.bootstrap_nodes`
+
+`server` and `client` sections remain mode-specific and only contain application-level settings
+such as `rules_file`, `server_id`, `forwards`, and `pipe`.
+
 ## Protocol
 
 Binary framing over Tox lossless custom packets:
@@ -170,3 +183,5 @@ tox-tcp-tunnel/
 3. **Access control**: Use `rules_file` to restrict what friends can access
 4. **Identity protection**: Back up `tox_save.dat` (contains private key)
 5. **NAT traversal**: Uses Tox's built-in NAT hole punching, no port forwarding needed
+6. **LAN bootstrap**: `tox.bootstrap_mode: lan` relies on local discovery and optional private
+   bootstrap nodes rather than the public node list

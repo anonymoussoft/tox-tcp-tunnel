@@ -824,3 +824,126 @@ bootstrap_nodes:
     ASSERT_EQ(nodes.size(), 1);
     EXPECT_EQ(nodes[0].port, 433);
 }
+
+TEST_F(ConfigTest, ParseCanonicalServerToxConfig) {
+    const char* yaml = R"(
+mode: server
+data_dir: /var/lib/toxtunnel
+tox:
+  udp_enabled: true
+  tcp_port: 33445
+  bootstrap_mode: lan
+  bootstrap_nodes:
+    - address: 192.168.1.10
+      port: 33445
+      public_key: 0000000000000000000000000000000000000000000000000000000000000000
+server:
+  rules_file: /etc/toxtunnel/rules.conf
+)";
+
+    auto result = Config::from_string(yaml);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const auto& config = result.value();
+    EXPECT_EQ(config.tox.udp_enabled, true);
+    EXPECT_EQ(config.tox.tcp_port, 33445);
+    EXPECT_EQ(config.tox.bootstrap_mode, BootstrapMode::Lan);
+    ASSERT_EQ(config.tox.bootstrap_nodes.size(), 1u);
+    EXPECT_EQ(config.tox.bootstrap_nodes[0].address, "192.168.1.10");
+    ASSERT_TRUE(config.server.has_value());
+    ASSERT_TRUE(config.server->rules_file.has_value());
+    EXPECT_EQ(*config.server->rules_file, "/etc/toxtunnel/rules.conf");
+}
+
+TEST_F(ConfigTest, ParseCanonicalClientToxConfig) {
+    const char* yaml = R"(
+mode: client
+data_dir: ~/.config/toxtunnel
+tox:
+  udp_enabled: true
+  bootstrap_mode: lan
+  bootstrap_nodes:
+    - address: 192.168.1.11
+      port: 33445
+      public_key: 1111111111111111111111111111111111111111111111111111111111111111
+client:
+  server_id: 0000000000000000000000000000000000000000000000000000000000000000000000000000
+  forwards:
+    - local_port: 2222
+      remote_host: localhost
+      remote_port: 22
+)";
+
+    auto result = Config::from_string(yaml);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const auto& config = result.value();
+    EXPECT_EQ(config.tox.bootstrap_mode, BootstrapMode::Lan);
+    ASSERT_EQ(config.tox.bootstrap_nodes.size(), 1u);
+    EXPECT_EQ(config.tox.bootstrap_nodes[0].address, "192.168.1.11");
+    ASSERT_TRUE(config.client.has_value());
+    EXPECT_EQ(config.client->forwards[0].local_port, 2222);
+}
+
+TEST_F(ConfigTest, LegacyServerBootstrapFieldsNormalizeIntoSharedToxConfig) {
+    const char* yaml = R"(
+mode: server
+data_dir: /var/lib/toxtunnel
+server:
+  tcp_port: 33445
+  udp_enabled: false
+  bootstrap_nodes:
+    - address: 192.168.1.12
+      port: 33445
+      public_key: 2222222222222222222222222222222222222222222222222222222222222222
+  rules_file: /etc/toxtunnel/rules.conf
+)";
+
+    auto result = Config::from_string(yaml);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const auto& config = result.value();
+    EXPECT_EQ(config.tox.tcp_port, 33445);
+    EXPECT_FALSE(config.tox.udp_enabled);
+    ASSERT_EQ(config.tox.bootstrap_nodes.size(), 1u);
+    EXPECT_EQ(config.tox.bootstrap_nodes[0].address, "192.168.1.12");
+    ASSERT_TRUE(config.server.has_value());
+    ASSERT_TRUE(config.server->rules_file.has_value());
+    EXPECT_EQ(*config.server->rules_file, "/etc/toxtunnel/rules.conf");
+}
+
+TEST_F(ConfigTest, ValidateLanBootstrapRequiresUdpEnabled) {
+    const char* yaml = R"(
+mode: server
+data_dir: /var/lib/toxtunnel
+tox:
+  udp_enabled: false
+  tcp_port: 33445
+  bootstrap_mode: lan
+server: {}
+)";
+
+    auto result = Config::from_string(yaml);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    auto validation = result.value().validate();
+    EXPECT_FALSE(validation.has_value());
+}
+
+TEST_F(ConfigTest, ToYamlEmitsCanonicalToxBlock) {
+    Config config = Config::default_server();
+    config.data_dir = "/test/path";
+    config.tox.udp_enabled = true;
+    config.tox.tcp_port = 12345;
+    config.tox.bootstrap_mode = BootstrapMode::Lan;
+    config.tox.bootstrap_nodes.push_back(
+        {"192.168.1.13", 33445,
+         "3333333333333333333333333333333333333333333333333333333333333333"});
+    config.server->rules_file = "/etc/toxtunnel/rules.conf";
+
+    std::string yaml = config.to_yaml();
+    EXPECT_TRUE(yaml.find("tox:") != std::string::npos);
+    EXPECT_TRUE(yaml.find("bootstrap_mode: lan") != std::string::npos);
+    EXPECT_TRUE(yaml.find("tcp_port: 12345") != std::string::npos);
+    EXPECT_TRUE(yaml.find("rules_file: /etc/toxtunnel/rules.conf") != std::string::npos);
+}

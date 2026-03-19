@@ -106,6 +106,7 @@ util::Expected<void, std::string> ToxAdapter::initialize(const ToxAdapterConfig&
 
     tox_options_set_udp_enabled(opts, config_.udp_enabled);
     tox_options_set_ipv6_enabled(opts, config_.ipv6_enabled);
+    tox_options_set_local_discovery_enabled(opts, config_.local_discovery_enabled);
 
     if (config_.tcp_port != 0) {
         tox_options_set_tcp_port(opts, config_.tcp_port);
@@ -256,24 +257,37 @@ bool ToxAdapter::is_running() const noexcept {
 // Network operations
 // ===========================================================================
 
+util::Expected<std::vector<BootstrapNode>, std::string>
+ToxAdapter::resolve_bootstrap_nodes_for_config(const ToxAdapterConfig& config,
+                                               BootstrapSource::Fetcher fetcher) {
+    return BootstrapSource::resolve_bootstrap_nodes(
+        config.bootstrap_nodes, config.bootstrap_mode, config.data_dir, std::move(fetcher));
+}
+
 std::size_t ToxAdapter::bootstrap() {
     if (!initialized_.load()) {
         util::Logger::error("Cannot bootstrap: ToxAdapter not initialized");
         return 0;
     }
 
-    std::vector<BootstrapNode> bootstrap_nodes = config_.bootstrap_nodes;
-    if (bootstrap_nodes.empty()) {
-        auto resolved = BootstrapSource::resolve_bootstrap_nodes({}, config_.data_dir);
-        if (resolved) {
-            bootstrap_nodes = resolved.value();
+    std::vector<BootstrapNode> bootstrap_nodes;
+    auto resolved = resolve_bootstrap_nodes_for_config(config_);
+    if (resolved) {
+        bootstrap_nodes = resolved.value();
+        if (config_.bootstrap_mode == BootstrapMode::Lan && bootstrap_nodes.empty()) {
+            util::Logger::info("LAN bootstrap mode enabled; relying on local discovery");
+        } else if (config_.bootstrap_mode == BootstrapMode::Auto &&
+                   config_.bootstrap_nodes.empty()) {
             util::Logger::info("Loaded {} bootstrap node(s) from {}",
                                bootstrap_nodes.size(),
                                std::string(BootstrapSource::kDefaultNodesUrl));
-        } else {
-            util::Logger::warn("No bootstrap nodes configured and default discovery failed: {}",
-                               resolved.error());
         }
+    } else if (config_.bootstrap_mode == BootstrapMode::Lan) {
+        util::Logger::info("LAN bootstrap mode enabled but bootstrap resolution returned: {}",
+                           resolved.error());
+    } else {
+        util::Logger::warn("No bootstrap nodes configured and default discovery failed: {}",
+                           resolved.error());
     }
 
     std::size_t success_count = 0;

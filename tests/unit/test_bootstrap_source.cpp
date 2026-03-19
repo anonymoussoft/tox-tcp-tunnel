@@ -78,7 +78,7 @@ TEST_F(BootstrapSourceTest, ResolveBootstrapNodesUsesExplicitNodesWithoutFetchin
 
     bool fetch_called = false;
     auto result = BootstrapSource::resolve_bootstrap_nodes(
-        configured, temp_dir_,
+        configured, BootstrapMode::Auto, temp_dir_,
         [&fetch_called]() -> util::Expected<std::string, BootstrapFetchError> {
             fetch_called = true;
             return util::unexpected(BootstrapFetchError{std::string("should not fetch")});
@@ -102,7 +102,7 @@ TEST_F(BootstrapSourceTest, ResolveBootstrapNodesFallsBackToCacheWhenFetchFails)
 ])");
 
     auto result = BootstrapSource::resolve_bootstrap_nodes(
-        {}, temp_dir_,
+        {}, BootstrapMode::Auto, temp_dir_,
         []() -> util::Expected<std::string, BootstrapFetchError> {
             return util::unexpected(BootstrapFetchError{std::string("network down")});
         });
@@ -110,6 +110,53 @@ TEST_F(BootstrapSourceTest, ResolveBootstrapNodesFallsBackToCacheWhenFetchFails)
     ASSERT_TRUE(result.has_value()) << result.error();
     ASSERT_EQ(result.value().size(), 1u);
     EXPECT_EQ(result.value()[0].ip, "203.0.113.30");
+}
+
+TEST_F(BootstrapSourceTest, ResolveBootstrapNodesLanModeSkipsFetchAndCache) {
+    write_cache(R"([
+  {
+    "ipv4": "203.0.113.30",
+    "port": 33445,
+    "public_key": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE",
+    "status_udp": true,
+    "status_tcp": true
+  }
+])");
+
+    bool fetch_called = false;
+    auto result = BootstrapSource::resolve_bootstrap_nodes(
+        {}, BootstrapMode::Lan, temp_dir_,
+        [&fetch_called]() -> util::Expected<std::string, BootstrapFetchError> {
+            fetch_called = true;
+            return util::unexpected(BootstrapFetchError{std::string("should not fetch")});
+        });
+
+    ASSERT_TRUE(result.has_value()) << result.error();
+    EXPECT_TRUE(result.value().empty());
+    EXPECT_FALSE(fetch_called);
+}
+
+TEST_F(BootstrapSourceTest, ResolveBootstrapNodesLanModeReturnsExplicitNodes) {
+    const auto explicit_pk = parse_public_key(
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
+    ASSERT_TRUE(explicit_pk.has_value()) << explicit_pk.error();
+
+    std::vector<BootstrapNode> configured = {
+        BootstrapNode{"192.168.1.20", 33445, explicit_pk.value()}
+    };
+
+    bool fetch_called = false;
+    auto result = BootstrapSource::resolve_bootstrap_nodes(
+        configured, BootstrapMode::Lan, temp_dir_,
+        [&fetch_called]() -> util::Expected<std::string, BootstrapFetchError> {
+            fetch_called = true;
+            return util::unexpected(BootstrapFetchError{std::string("should not fetch")});
+        });
+
+    ASSERT_TRUE(result.has_value()) << result.error();
+    ASSERT_EQ(result.value().size(), 1u);
+    EXPECT_EQ(result.value()[0].ip, "192.168.1.20");
+    EXPECT_FALSE(fetch_called);
 }
 
 }  // namespace

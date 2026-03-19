@@ -454,5 +454,74 @@ TEST_F(ConfigPipelineTest, CompleteClientConfig) {
     EXPECT_TRUE(validation.has_value()) << validation.error();
 }
 
+TEST_F(ConfigPipelineTest, CanonicalSharedToxConfigRoundTrip) {
+    const std::string yaml = std::string(R"(
+mode: server
+data_dir: /var/lib/toxtunnel
+logging:
+  level: info
+tox:
+  udp_enabled: true
+  tcp_port: 44000
+  bootstrap_mode: lan
+  bootstrap_nodes:
+    - address: 192.168.1.50
+      port: 33445
+      public_key: )") + kValidPublicKey + R"(
+server:
+  rules_file: /etc/toxtunnel/rules.yaml
+)";
+
+    auto result = Config::from_string(yaml);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const Config& cfg = result.value();
+    EXPECT_EQ(cfg.mode, Mode::Server);
+    EXPECT_TRUE(cfg.tox.udp_enabled);
+    EXPECT_EQ(cfg.tox.tcp_port, 44000);
+    EXPECT_EQ(cfg.tox.bootstrap_mode, BootstrapMode::Lan);
+    ASSERT_EQ(cfg.tox.bootstrap_nodes.size(), 1u);
+    EXPECT_EQ(cfg.tox.bootstrap_nodes[0].address, "192.168.1.50");
+    ASSERT_TRUE(cfg.server.has_value());
+    ASSERT_TRUE(cfg.server->rules_file.has_value());
+    EXPECT_EQ(*cfg.server->rules_file, "/etc/toxtunnel/rules.yaml");
+
+    std::string serialized = cfg.to_yaml();
+    EXPECT_TRUE(serialized.find("tox:") != std::string::npos);
+    EXPECT_TRUE(serialized.find("bootstrap_mode: lan") != std::string::npos);
+
+    auto round_trip = Config::from_string(serialized);
+    ASSERT_TRUE(round_trip.has_value()) << round_trip.error();
+    EXPECT_EQ(round_trip.value().tox.bootstrap_mode, BootstrapMode::Lan);
+    EXPECT_EQ(round_trip.value().tox.tcp_port, 44000);
+}
+
+TEST_F(ConfigPipelineTest, LegacyServerBootstrapFieldsNormalizeToSharedToxConfig) {
+    const std::string yaml = std::string(R"(
+mode: server
+data_dir: /var/lib/toxtunnel
+server:
+  tcp_port: 44000
+  udp_enabled: false
+  bootstrap_nodes:
+    - address: node1.tox.chat
+      port: 33445
+      public_key: )") + kValidPublicKey + R"(
+  rules_file: /etc/toxtunnel/rules.yaml
+)";
+
+    auto result = Config::from_string(yaml);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const Config& cfg = result.value();
+    EXPECT_EQ(cfg.tox.tcp_port, 44000);
+    EXPECT_FALSE(cfg.tox.udp_enabled);
+    ASSERT_EQ(cfg.tox.bootstrap_nodes.size(), 1u);
+    EXPECT_EQ(cfg.tox.bootstrap_nodes[0].address, "node1.tox.chat");
+    ASSERT_TRUE(cfg.server.has_value());
+    ASSERT_TRUE(cfg.server->rules_file.has_value());
+    EXPECT_EQ(*cfg.server->rules_file, "/etc/toxtunnel/rules.yaml");
+}
+
 }  // namespace
 }  // namespace toxtunnel::integration

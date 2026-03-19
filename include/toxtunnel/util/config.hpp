@@ -59,6 +59,23 @@ struct BootstrapNodeConfig {
     }
 };
 
+using BootstrapMode = tox::BootstrapMode;
+
+/// Shared toxcore network configuration.
+struct ToxConfig {
+    bool udp_enabled = true;                           ///< Enable UDP for toxcore
+    uint16_t tcp_port = 33445;                        ///< TCP relay port (server use)
+    BootstrapMode bootstrap_mode = BootstrapMode::Auto;  ///< Bootstrap behavior
+    std::vector<BootstrapNodeConfig> bootstrap_nodes; ///< Explicit bootstrap nodes
+
+    bool operator==(const ToxConfig& other) const {
+        return udp_enabled == other.udp_enabled &&
+               tcp_port == other.tcp_port &&
+               bootstrap_mode == other.bootstrap_mode &&
+               bootstrap_nodes == other.bootstrap_nodes;
+    }
+};
+
 /// Logging configuration.
 struct LoggingConfig {
     util::LogLevel level = util::LogLevel::Info;     ///< Minimum log level
@@ -121,6 +138,7 @@ struct Config {
     Mode mode = Mode::Server;
     std::filesystem::path data_dir;           ///< Directory for Tox save data
     LoggingConfig logging;
+    ToxConfig tox;
 
     // Mode-specific options
     std::optional<ServerConfig> server;
@@ -165,6 +183,9 @@ struct Config {
     [[nodiscard]] util::Expected<void, std::string> save(
         const std::filesystem::path& filepath) const;
 
+    /// Return the effective tox configuration after applying compatibility fallbacks.
+    [[nodiscard]] ToxConfig effective_tox_config() const;
+
     // -----------------------------------------------------------------------
     // Accessors
     // -----------------------------------------------------------------------
@@ -185,6 +206,7 @@ struct Config {
         return mode == other.mode &&
                data_dir == other.data_dir &&
                logging == other.logging &&
+               effective_tox_config() == other.effective_tox_config() &&
                server == other.server &&
                client == other.client;
     }
@@ -239,6 +261,18 @@ template <>
 struct convert<toxtunnel::BootstrapNodeConfig> {
     static Node encode(const toxtunnel::BootstrapNodeConfig& rhs);
     static bool decode(const Node& node, toxtunnel::BootstrapNodeConfig& rhs);
+};
+
+template <>
+struct convert<toxtunnel::tox::BootstrapMode> {
+    static Node encode(const toxtunnel::tox::BootstrapMode& rhs);
+    static bool decode(const Node& node, toxtunnel::tox::BootstrapMode& rhs);
+};
+
+template <>
+struct convert<toxtunnel::ToxConfig> {
+    static Node encode(const toxtunnel::ToxConfig& rhs);
+    static bool decode(const Node& node, toxtunnel::ToxConfig& rhs);
 };
 
 template <>

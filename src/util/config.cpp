@@ -1,6 +1,7 @@
 #include "toxtunnel/util/config.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 
@@ -41,6 +42,52 @@ public:
 };
 
 const ConfigErrorCategory g_config_error_category{};
+
+const char* bootstrap_mode_to_string(toxtunnel::tox::BootstrapMode mode) {
+    switch (mode) {
+        case toxtunnel::tox::BootstrapMode::Auto:
+            return "auto";
+        case toxtunnel::tox::BootstrapMode::Lan:
+            return "lan";
+        default:
+            return "auto";
+    }
+}
+
+util::Expected<void, std::string> validate_bootstrap_nodes(
+    const std::vector<toxtunnel::BootstrapNodeConfig>& nodes) {
+    for (const auto& node : nodes) {
+        if (node.address.empty()) {
+            return util::make_unexpected(std::string("Bootstrap node address cannot be empty"));
+        }
+        if (node.port == 0) {
+            return util::make_unexpected(std::string("Bootstrap node port cannot be 0"));
+        }
+        if (node.public_key.length() != toxtunnel::tox::kPublicKeyHexLen) {
+            return util::make_unexpected(
+                std::string("Bootstrap node public key must be ") +
+                std::to_string(toxtunnel::tox::kPublicKeyHexLen) +
+                std::string(" characters, got ") + std::to_string(node.public_key.length()));
+        }
+        auto pk_result = toxtunnel::tox::parse_public_key(node.public_key);
+        if (!pk_result) {
+            return util::make_unexpected(
+                std::string("Invalid bootstrap node public key: ") + pk_result.error());
+        }
+    }
+
+    return {};
+}
+
+void sync_legacy_server_tox_fields(toxtunnel::Config& config) {
+    if (!config.server.has_value()) {
+        return;
+    }
+
+    config.server->tcp_port = config.tox.tcp_port;
+    config.server->udp_enabled = config.tox.udp_enabled;
+    config.server->bootstrap_nodes = config.tox.bootstrap_nodes;
+}
 
 }  // namespace
 
@@ -160,6 +207,7 @@ Config Config::default_server() {
     config.mode = Mode::Server;
     config.data_dir = "/var/lib/toxtunnel";
     config.server = ServerConfig{};
+    sync_legacy_server_tox_fields(config);
     return config;
 }
 
@@ -171,14 +219,46 @@ Config Config::default_client() {
     return config;
 }
 
+ToxConfig Config::effective_tox_config() const {
+    ToxConfig effective = tox;
+    const ToxConfig defaults{};
+
+    if (mode == Mode::Server && server.has_value()) {
+        if (effective.tcp_port == defaults.tcp_port && server->tcp_port != defaults.tcp_port) {
+            effective.tcp_port = server->tcp_port;
+        }
+        if (effective.udp_enabled == defaults.udp_enabled &&
+            server->udp_enabled != defaults.udp_enabled) {
+            effective.udp_enabled = server->udp_enabled;
+        }
+        if (effective.bootstrap_nodes.empty() && !server->bootstrap_nodes.empty()) {
+            effective.bootstrap_nodes = server->bootstrap_nodes;
+        }
+    }
+
+    return effective;
+}
+
 // ---------------------------------------------------------------------------
 // Config validation
 // ---------------------------------------------------------------------------
 
 util::Expected<void, std::string> Config::validate() const {
+    const ToxConfig effective_tox = effective_tox_config();
+
     // Validate mode
     if (mode != Mode::Server && mode != Mode::Client) {
         return util::make_unexpected(std::string("Invalid mode"));
+    }
+
+    auto bootstrap_validation = validate_bootstrap_nodes(effective_tox.bootstrap_nodes);
+    if (!bootstrap_validation) {
+        return bootstrap_validation;
+    }
+
+    if (effective_tox.bootstrap_mode == BootstrapMode::Lan && !effective_tox.udp_enabled) {
+        return util::make_unexpected(
+            std::string("LAN bootstrap mode requires tox.udp_enabled to be true"));
     }
 
     // Validate mode-specific configuration
@@ -188,28 +268,8 @@ util::Expected<void, std::string> Config::validate() const {
         }
 
         // Validate TCP port
-        if (server->tcp_port == 0) {
+        if (effective_tox.tcp_port == 0) {
             return util::make_unexpected(std::string("TCP port cannot be 0"));
-        }
-
-        // Validate bootstrap nodes
-        for (const auto& node : server->bootstrap_nodes) {
-            if (node.address.empty()) {
-                return util::make_unexpected(std::string("Bootstrap node address cannot be empty"));
-            }
-            if (node.port == 0) {
-                return util::make_unexpected(std::string("Bootstrap node port cannot be 0"));
-            }
-            if (node.public_key.length() != tox::kPublicKeyHexLen) {
-                return util::make_unexpected(
-                    std::string("Bootstrap node public key must be ") +
-                    std::to_string(tox::kPublicKeyHexLen) + std::string(" characters, got ") +
-                    std::to_string(node.public_key.length()));
-            }
-            auto pk_result = tox::parse_public_key(node.public_key);
-            if (!pk_result) {
-                return util::make_unexpected(std::string("Invalid bootstrap node public key: ") + pk_result.error());
-            }
         }
     } else {  // Client mode
         if (!client) {
@@ -279,6 +339,19 @@ void Config::merge_cli_overrides(const Config& overrides) {
         }
     }
 
+    if (!overrides.tox.udp_enabled) {
+        tox.udp_enabled = overrides.tox.udp_enabled;
+    }
+    if (overrides.tox.tcp_port != 33445) {
+        tox.tcp_port = overrides.tox.tcp_port;
+    }
+    if (overrides.tox.bootstrap_mode != BootstrapMode::Auto) {
+        tox.bootstrap_mode = overrides.tox.bootstrap_mode;
+    }
+    if (!overrides.tox.bootstrap_nodes.empty()) {
+        tox.bootstrap_nodes = overrides.tox.bootstrap_nodes;
+    }
+
     // Handle mode change
     if (overrides.mode != mode) {
         mode = overrides.mode;
@@ -295,12 +368,15 @@ void Config::merge_cli_overrides(const Config& overrides) {
     if (overrides.server && server) {
         if (overrides.server->tcp_port != 33445) {
             server->tcp_port = overrides.server->tcp_port;
+            tox.tcp_port = overrides.server->tcp_port;
         }
         if (!overrides.server->udp_enabled) {
             server->udp_enabled = overrides.server->udp_enabled;
+            tox.udp_enabled = overrides.server->udp_enabled;
         }
         if (!overrides.server->bootstrap_nodes.empty()) {
             server->bootstrap_nodes = overrides.server->bootstrap_nodes;
+            tox.bootstrap_nodes = overrides.server->bootstrap_nodes;
         }
         if (overrides.server->rules_file.has_value()) {
             server->rules_file = overrides.server->rules_file;
@@ -319,6 +395,8 @@ void Config::merge_cli_overrides(const Config& overrides) {
             client->pipe_target = overrides.client->pipe_target;
         }
     }
+
+    sync_legacy_server_tox_fields(*this);
 }
 
 // Helper function to encode LogLevel to string
@@ -336,6 +414,8 @@ static const char* log_level_to_string(util::LogLevel level) {
 }
 
 std::string Config::to_yaml() const {
+    const ToxConfig effective_tox = effective_tox_config();
+
     YAML::Emitter out;
     out << YAML::BeginMap;
 
@@ -354,23 +434,28 @@ std::string Config::to_yaml() const {
     }
     out << YAML::EndMap;
 
+    out << YAML::Key << "tox" << YAML::Value << YAML::BeginMap;
+    out << YAML::Key << "udp_enabled" << YAML::Value << effective_tox.udp_enabled;
+    out << YAML::Key << "tcp_port" << YAML::Value << effective_tox.tcp_port;
+    out << YAML::Key << "bootstrap_mode" << YAML::Value
+        << bootstrap_mode_to_string(effective_tox.bootstrap_mode);
+    if (!effective_tox.bootstrap_nodes.empty()) {
+        out << YAML::Key << "bootstrap_nodes";
+        out << YAML::BeginSeq;
+        for (const auto& node : effective_tox.bootstrap_nodes) {
+            out << YAML::BeginMap;
+            out << YAML::Key << "address" << YAML::Value << node.address;
+            out << YAML::Key << "port" << YAML::Value << node.port;
+            out << YAML::Key << "public_key" << YAML::Value << node.public_key;
+            out << YAML::EndMap;
+        }
+        out << YAML::EndSeq;
+    }
+    out << YAML::EndMap;
+
     // Server config
     if (server) {
         out << YAML::Key << "server" << YAML::Value << YAML::BeginMap;
-        out << YAML::Key << "tcp_port" << YAML::Value << server->tcp_port;
-        out << YAML::Key << "udp_enabled" << YAML::Value << server->udp_enabled;
-        if (!server->bootstrap_nodes.empty()) {
-            out << YAML::Key << "bootstrap_nodes";
-            out << YAML::BeginSeq;
-            for (const auto& node : server->bootstrap_nodes) {
-                out << YAML::BeginMap;
-                out << YAML::Key << "address" << YAML::Value << node.address;
-                out << YAML::Key << "port" << YAML::Value << node.port;
-                out << YAML::Key << "public_key" << YAML::Value << node.public_key;
-                out << YAML::EndMap;
-            }
-            out << YAML::EndSeq;
-        }
         if (server->rules_file) {
             out << YAML::Key << "rules_file" << YAML::Value << *server->rules_file;
         }
@@ -451,11 +536,13 @@ namespace YAML {
 using toxtunnel::ForwardRule;
 using toxtunnel::PipeTarget;
 using toxtunnel::BootstrapNodeConfig;
+using toxtunnel::ToxConfig;
 using toxtunnel::LoggingConfig;
 using toxtunnel::ServerConfig;
 using toxtunnel::ClientConfig;
 using toxtunnel::Mode;
 using toxtunnel::Config;
+using toxtunnel::tox::BootstrapMode;
 using toxtunnel::tox::kPublicKeyHexLen;
 
 // ---------------------------------------------------------------------------
@@ -562,6 +649,64 @@ bool convert<BootstrapNodeConfig>::decode(const Node& node, BootstrapNodeConfig&
 // ---------------------------------------------------------------------------
 // LoggingConfig
 // ---------------------------------------------------------------------------
+
+Node convert<BootstrapMode>::encode(const BootstrapMode& rhs) {
+    return Node(toxtunnel::bootstrap_mode_to_string(rhs));
+}
+
+bool convert<BootstrapMode>::decode(const Node& node, BootstrapMode& rhs) {
+    if (!node.IsScalar()) {
+        return false;
+    }
+
+    auto str = node.as<std::string>();
+    std::transform(str.begin(), str.end(), str.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    if (str == "auto") {
+        rhs = BootstrapMode::Auto;
+        return true;
+    }
+    if (str == "lan") {
+        rhs = BootstrapMode::Lan;
+        return true;
+    }
+
+    return false;
+}
+
+Node convert<ToxConfig>::encode(const ToxConfig& rhs) {
+    Node node;
+    node["udp_enabled"] = rhs.udp_enabled;
+    node["tcp_port"] = rhs.tcp_port;
+    node["bootstrap_mode"] = rhs.bootstrap_mode;
+    if (!rhs.bootstrap_nodes.empty()) {
+        node["bootstrap_nodes"] = rhs.bootstrap_nodes;
+    }
+    return node;
+}
+
+bool convert<ToxConfig>::decode(const Node& node, ToxConfig& rhs) {
+    if (!node.IsMap()) {
+        return false;
+    }
+
+    if (node["udp_enabled"]) {
+        rhs.udp_enabled = node["udp_enabled"].as<bool>();
+    }
+    if (node["tcp_port"]) {
+        rhs.tcp_port = node["tcp_port"].as<uint16_t>();
+    }
+    if (node["bootstrap_mode"]) {
+        rhs.bootstrap_mode = node["bootstrap_mode"].as<BootstrapMode>();
+    }
+    if (node["bootstrap_nodes"]) {
+        rhs.bootstrap_nodes = node["bootstrap_nodes"].as<std::vector<BootstrapNodeConfig>>();
+    }
+
+    return true;
+}
 
 Node convert<LoggingConfig>::encode(const LoggingConfig& rhs) {
     Node node;
@@ -746,17 +891,14 @@ bool convert<toxtunnel::util::LogLevel>::decode(const Node& node, toxtunnel::uti
 
 Node convert<Config>::encode(const Config& rhs) {
     Node node;
+    const auto effective_tox = rhs.effective_tox_config();
     node["mode"] = rhs.mode;
     node["data_dir"] = rhs.data_dir.string();
     node["logging"] = rhs.logging;
+    node["tox"] = effective_tox;
 
     if (rhs.server) {
         Node server_node;
-        server_node["tcp_port"] = rhs.server->tcp_port;
-        server_node["udp_enabled"] = rhs.server->udp_enabled;
-        if (!rhs.server->bootstrap_nodes.empty()) {
-            server_node["bootstrap_nodes"] = rhs.server->bootstrap_nodes;
-        }
         if (rhs.server->rules_file) {
             server_node["rules_file"] = *rhs.server->rules_file;
         }
@@ -801,30 +943,46 @@ bool convert<Config>::decode(const Node& node, Config& rhs) {
         rhs.logging = node["logging"].as<LoggingConfig>();
     }
 
+    if (node["tox"]) {
+        rhs.tox = node["tox"].as<ToxConfig>();
+    }
+
     // Mode-specific config
     if (rhs.mode == Mode::Server) {
         rhs.server = ServerConfig{};
-        Node server_node = node["server"] ? node["server"] : node;
-
-        if (server_node["tcp_port"]) {
-            rhs.server->tcp_port = server_node["tcp_port"].as<uint16_t>();
-        }
-
-        if (server_node["udp_enabled"]) {
-            rhs.server->udp_enabled = server_node["udp_enabled"].as<bool>();
-        }
-
-        if (server_node["bootstrap_nodes"]) {
-            rhs.server->bootstrap_nodes =
-                server_node["bootstrap_nodes"].as<std::vector<BootstrapNodeConfig>>();
-        }
+        const Node server_node = node["server"] ? node["server"] : node;
+        const bool has_canonical_tox = node["tox"] && node["tox"].IsMap();
 
         if (server_node["rules_file"]) {
             rhs.server->rules_file = server_node["rules_file"].as<std::string>();
         }
+
+        if (!has_canonical_tox) {
+            if (server_node["tcp_port"]) {
+                rhs.tox.tcp_port = server_node["tcp_port"].as<uint16_t>();
+            } else if (node["tcp_port"]) {
+                rhs.tox.tcp_port = node["tcp_port"].as<uint16_t>();
+            }
+
+            if (server_node["udp_enabled"]) {
+                rhs.tox.udp_enabled = server_node["udp_enabled"].as<bool>();
+            } else if (node["udp_enabled"]) {
+                rhs.tox.udp_enabled = node["udp_enabled"].as<bool>();
+            }
+
+            if (server_node["bootstrap_nodes"]) {
+                rhs.tox.bootstrap_nodes =
+                    server_node["bootstrap_nodes"].as<std::vector<BootstrapNodeConfig>>();
+            } else if (node["bootstrap_nodes"]) {
+                rhs.tox.bootstrap_nodes =
+                    node["bootstrap_nodes"].as<std::vector<BootstrapNodeConfig>>();
+            }
+        }
+
+        toxtunnel::sync_legacy_server_tox_fields(rhs);
     } else {  // Client mode
         rhs.client = ClientConfig{};
-        Node client_node = node["client"] ? node["client"] : node;
+        const Node client_node = node["client"] ? node["client"] : node;
 
         if (client_node["server_id"]) {
             rhs.client->server_id = client_node["server_id"].as<std::string>();

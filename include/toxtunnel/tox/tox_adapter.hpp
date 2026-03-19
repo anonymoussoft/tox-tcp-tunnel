@@ -2,6 +2,7 @@
 
 #include <toxcore/tox.h>
 
+#include "toxtunnel/tox/bootstrap_source.hpp"
 #include "toxtunnel/tox/types.hpp"
 #include "toxtunnel/util/expected.hpp"
 
@@ -95,6 +96,9 @@ struct ToxAdapterConfig {
     /// Whether to enable IPv6.
     bool ipv6_enabled = false;
 
+    /// Whether to enable toxcore local discovery.
+    bool local_discovery_enabled = false;
+
     /// Local TCP relay port (0 = disabled).
     uint16_t tcp_port = 0;
 
@@ -109,6 +113,9 @@ struct ToxAdapterConfig {
 
     /// Bootstrap nodes to connect to.
     std::vector<BootstrapNode> bootstrap_nodes;
+
+    /// Bootstrap policy to use when no explicit nodes are provided.
+    BootstrapMode bootstrap_mode = BootstrapMode::Auto;
 
     /// Name to set on the Tox instance (visible to friends).
     std::string name = "toxtunnel";
@@ -214,6 +221,12 @@ class ToxAdapter {
     ///
     /// @return The number of nodes that were successfully contacted.
     [[nodiscard]] std::size_t bootstrap();
+
+    /// Resolve bootstrap nodes for a config without touching a live Tox instance.
+    [[nodiscard]] static util::Expected<std::vector<BootstrapNode>, std::string>
+    resolve_bootstrap_nodes_for_config(
+        const ToxAdapterConfig& config,
+        BootstrapSource::Fetcher fetcher = {});
 
     /// Add a single bootstrap node at runtime and attempt to connect.
     ///

@@ -28,6 +28,7 @@ class BootstrapSource {
 
     [[nodiscard]] static util::Expected<std::vector<BootstrapNode>, std::string>
     resolve_bootstrap_nodes(const std::vector<BootstrapNode>& configured_nodes,
+                            BootstrapMode bootstrap_mode,
                             const std::filesystem::path& data_dir,
                             Fetcher fetcher = {},
                             std::size_t max_nodes = kDefaultMaxNodes);

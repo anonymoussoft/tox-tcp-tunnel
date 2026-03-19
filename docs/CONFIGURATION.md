@@ -12,16 +12,17 @@ logging:
   level: info
   file: /var/log/toxtunnel.log     # optional
 
-server:
-  tcp_port: 33445
+tox:
   udp_enabled: true
-  rules_file: /etc/toxtunnel/rules.yaml   # optional access control
-
-  # Optional: custom bootstrap nodes (see below)
+  tcp_port: 33445
+  bootstrap_mode: auto             # auto or lan
   bootstrap_nodes:
     - address: tox.node.example.com
       port: 33445
       public_key: "AABBCCDD..."
+
+server:
+  rules_file: /etc/toxtunnel/rules.yaml   # optional access control
 ```
 
 ## Client Configuration
@@ -32,6 +33,11 @@ data_dir: ~/.toxtunnel
 
 logging:
   level: info
+
+tox:
+  udp_enabled: true
+  bootstrap_mode: auto
+  bootstrap_nodes: []
 
 client:
   server_id: "AABBCCDD..."               # 76 hex characters (full Tox address)
@@ -46,25 +52,47 @@ client:
       remote_port: 80                     # local:8080 -> remote:80
 ```
 
-## Bootstrap Nodes
+## Tox Network Configuration
 
-Bootstrap nodes help your Tox client find other peers on the network.
+Shared toxcore network settings now live under the top-level `tox:` block for both client and
+server.
 
-### Automatic (Default)
+### `bootstrap_mode: auto` (Default)
 
-If `bootstrap_nodes` is omitted, ToxTunnel automatically:
+If `tox.bootstrap_nodes` is empty and `bootstrap_mode` is `auto`, ToxTunnel automatically:
 1. Fetches a current node list from `https://nodes.tox.chat/json` on startup
 2. Caches the list under `data_dir/bootstrap_nodes.json`
-3. Uses cached nodes on subsequent starts (refreshes if stale)
+3. Uses cached nodes when the remote fetch fails
 
 This is the recommended approach for most users.
 
-### Manual Configuration
+### `bootstrap_mode: lan`
 
-For air-gapped environments or to pin specific nodes:
+Use this when both peers are on the same local network and you do not want to depend on
+`https://nodes.tox.chat/json`.
 
 ```yaml
-server:
+tox:
+  udp_enabled: true
+  bootstrap_mode: lan
+  bootstrap_nodes: []
+```
+
+In LAN mode ToxTunnel:
+- enables toxcore local discovery,
+- does not fetch the public node list,
+- does not read or write `bootstrap_nodes.json`,
+- and still uses any explicitly configured `tox.bootstrap_nodes` as supplements.
+
+LAN mode requires `tox.udp_enabled: true` and works best when both peers are on the same broadcast
+domain.
+
+### Manual Bootstrap Nodes
+
+For air-gapped environments, private networks, or pinned bootstrap daemons:
+
+```yaml
+tox:
   bootstrap_nodes:
     - address: 144.217.167.73
       port: 33445
@@ -76,6 +104,12 @@ server:
 
 Get current bootstrap nodes from:
 - https://nodes.tox.chat/json (official Tox node list)
+
+### Compatibility
+
+Legacy server bootstrap fields such as `server.tcp_port`, `server.udp_enabled`, and
+`server.bootstrap_nodes` are still accepted when reading older configs. Newly serialized configs
+always use the canonical top-level `tox:` block.
 
 ## Access Control Rules
 
