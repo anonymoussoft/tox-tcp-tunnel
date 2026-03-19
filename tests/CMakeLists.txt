@@ -31,3 +31,22 @@ else()
     target_compile_options(unit_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 gtest_discover_tests(unit_tests)
+
+# Integration tests
+add_executable(integration_tests
+    integration/test_config_pipeline.cpp
+    integration/test_rules_integration.cpp
+    integration/test_tcp_loopback.cpp
+    integration/test_tunnel_data_flow.cpp
+)
+target_link_libraries(integration_tests PRIVATE
+    toxtunnel_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+if(MSVC)
+    target_compile_options(integration_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(integration_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+gtest_discover_tests(integration_tests)
