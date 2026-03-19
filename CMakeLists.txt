@@ -72,6 +72,8 @@ target_sources(toxtunnel_lib PRIVATE
     src/tox/tox_connection.cpp
     src/tox/tox_adapter.cpp
     src/app/rules_engine.cpp
+    src/app/tunnel_client.cpp
+    src/app/tunnel_server.cpp
     src/util/config.cpp
     src/util/error.cpp
     src/util/logger.cpp

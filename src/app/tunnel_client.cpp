@@ -1,0 +1,347 @@
+#include "toxtunnel/app/tunnel_client.hpp"
+
+#include "toxtunnel/core/tcp_connection.hpp"
+#include "toxtunnel/tunnel/protocol.hpp"
+#include "toxtunnel/tunnel/tunnel.hpp"
+#include "toxtunnel/util/logger.hpp"
+
+#include <span>
+
+namespace toxtunnel::app {
+
+// -------------------------------------------------------------------------
+// Construction / Destruction
+// -------------------------------------------------------------------------
+
+TunnelClient::TunnelClient() = default;
+
+TunnelClient::~TunnelClient() {
+    if (running_) {
+        stop();
+    }
+}
+
+// -------------------------------------------------------------------------
+// Lifecycle
+// -------------------------------------------------------------------------
+
+util::Expected<void, std::string> TunnelClient::initialize(const Config& config) {
+    if (!config.is_client()) {
+        return util::unexpected(std::string("Configuration is not in client mode"));
+    }
+
+    if (!config.client.has_value()) {
+        return util::unexpected(std::string("Missing client configuration"));
+    }
+
+    config_ = config;
+    const auto& client_cfg = config.client_config();
+
+    // Create IoContext
+    io_ctx_ = std::make_unique<core::IoContext>();
+
+    // Create ToxAdapter and configure it
+    tox_adapter_ = std::make_unique<tox::ToxAdapter>();
+
+    tox::ToxAdapterConfig tox_config;
+    tox_config.data_dir = config.data_dir;
+    tox_config.udp_enabled = true;
+    tox_config.name = "toxtunnel-client";
+    tox_config.status_message = "toxtunnel client node";
+
+    auto init_result = tox_adapter_->initialize(tox_config);
+    if (!init_result) {
+        return util::unexpected(std::string("Failed to initialize ToxAdapter: ") +
+                                init_result.error());
+    }
+
+    // Parse server Tox ID and add as friend
+    auto tox_id_result = tox::ToxId::from_hex(client_cfg.server_id);
+    if (!tox_id_result) {
+        return util::unexpected(std::string("Invalid server Tox ID: ") +
+                                tox_id_result.error());
+    }
+
+    auto friend_result = tox_adapter_->add_friend(tox_id_result.value(), "toxtunnel client");
+    if (!friend_result) {
+        // The friend may already exist; try adding by public key without request
+        auto pk = tox_id_result.value().public_key();
+        auto noreq_result = tox_adapter_->add_friend_norequest(pk);
+        if (!noreq_result) {
+            return util::unexpected(
+                std::string("Failed to add server as friend: ") + friend_result.error());
+        }
+        server_friend_number_ = noreq_result.value();
+    } else {
+        server_friend_number_ = friend_result.value();
+    }
+
+    util::Logger::info("Server friend added with friend number {}", server_friend_number_);
+
+    // Create TunnelManager
+    tunnel_mgr_ = std::make_unique<tunnel::TunnelManager>(io_ctx_->get_io_context());
+
+    // Set up callbacks and handlers
+    setup_tox_callbacks();
+    setup_tunnel_manager();
+
+    // Create TCP listeners for each forwarding rule
+    create_listeners(client_cfg.forwards);
+
+    return {};
+}
+
+void TunnelClient::start() {
+    if (running_) {
+        util::Logger::warn("TunnelClient is already running");
+        return;
+    }
+
+    running_ = true;
+
+    // Start IoContext thread pool
+    io_ctx_->run();
+
+    // Start ToxAdapter iteration thread
+    tox_adapter_->start();
+
+    // Bootstrap DHT
+    auto bootstrapped = tox_adapter_->bootstrap();
+    util::Logger::info("Bootstrapped to {} DHT nodes", bootstrapped);
+
+    // Log our Tox ID
+    auto address = tox_adapter_->get_address();
+    util::Logger::info("Client Tox ID: {}", address.to_hex());
+
+    // Start all TCP listeners
+    for (std::size_t i = 0; i < listeners_.size(); ++i) {
+        const auto& rule = forward_rules_[i];
+        auto& listener = listeners_[i];
+
+        listener->start_accept(
+            [this, &rule](std::shared_ptr<core::TcpConnection> conn) {
+                on_tcp_connection_accepted(std::move(conn), rule);
+            });
+
+        util::Logger::info("Listening on local port {} -> {}:{}",
+                           rule.local_port, rule.remote_host, rule.remote_port);
+    }
+}
+
+void TunnelClient::stop() {
+    if (!running_) {
+        return;
+    }
+
+    util::Logger::info("Stopping TunnelClient...");
+
+    // Stop all TCP listeners
+    for (auto& listener : listeners_) {
+        listener->stop();
+    }
+
+    // Close all tunnels
+    tunnel_mgr_->close_all();
+
+    // Stop ToxAdapter
+    tox_adapter_->stop();
+
+    // Stop IoContext
+    io_ctx_->stop();
+
+    running_ = false;
+
+    util::Logger::info("TunnelClient stopped");
+}
+
+bool TunnelClient::is_running() const noexcept {
+    return running_.load(std::memory_order_acquire);
+}
+
+// -------------------------------------------------------------------------
+// Accessors
+// -------------------------------------------------------------------------
+
+std::string TunnelClient::get_tox_address() const {
+    return tox_adapter_->get_address().to_hex();
+}
+
+// -------------------------------------------------------------------------
+// Internal helpers
+// -------------------------------------------------------------------------
+
+void TunnelClient::setup_tox_callbacks() {
+    // Friend connection status changes
+    tox_adapter_->set_on_friend_connection(
+        [this](uint32_t friend_number, bool connected) {
+            if (friend_number == server_friend_number_) {
+                server_online_ = connected;
+                if (connected) {
+                    util::Logger::info("Server friend {} is now online", friend_number);
+                } else {
+                    util::Logger::warn("Server friend {} went offline", friend_number);
+                }
+            }
+        });
+
+    // Lossless packet handler: deserialize and route to TunnelManager
+    tox_adapter_->set_on_lossless_packet(
+        [this](uint32_t friend_number, const uint8_t* data, std::size_t length) {
+            if (friend_number != server_friend_number_) {
+                util::Logger::warn("Received lossless packet from unexpected friend {}",
+                                   friend_number);
+                return;
+            }
+
+            if (length < 2) {
+                util::Logger::warn("Lossless packet too short ({} bytes)", length);
+                return;
+            }
+
+            // Skip byte 0 (lossless packet prefix byte), deserialize from byte 1
+            auto frame_data = std::span<const uint8_t>(data + 1, length - 1);
+            auto frame_result = tunnel::ProtocolFrame::deserialize(frame_data);
+            if (!frame_result) {
+                util::Logger::error("Failed to deserialize ProtocolFrame from lossless packet");
+                return;
+            }
+
+            tunnel_mgr_->route_frame(frame_result.value());
+        });
+
+    // Self connection status (DHT connectivity)
+    tox_adapter_->set_on_self_connection(
+        [](bool connected) {
+            if (connected) {
+                util::Logger::info("Connected to Tox DHT");
+            } else {
+                util::Logger::warn("Disconnected from Tox DHT");
+            }
+        });
+}
+
+void TunnelClient::setup_tunnel_manager() {
+    // Send handler: serialize frame, prepend 0xA0 lossless prefix, send via ToxAdapter
+    tunnel_mgr_->set_send_handler(
+        [this](const std::vector<uint8_t>& frame_data) -> bool {
+            // Prepend lossless packet prefix byte (0xA0)
+            std::vector<uint8_t> packet;
+            packet.reserve(1 + frame_data.size());
+            packet.push_back(0xA0);
+            packet.insert(packet.end(), frame_data.begin(), frame_data.end());
+
+            return tox_adapter_->send_lossless_packet(
+                server_friend_number_, packet.data(), packet.size());
+        });
+
+    // Tunnel closed callback
+    tunnel_mgr_->set_on_tunnel_closed(
+        [](uint16_t tunnel_id) {
+            util::Logger::debug("Tunnel {} closed", tunnel_id);
+        });
+}
+
+void TunnelClient::create_listeners(const std::vector<ForwardRule>& forwards) {
+    forward_rules_ = forwards;
+    listeners_.reserve(forwards.size());
+
+    for (const auto& rule : forwards) {
+        auto listener = std::make_unique<core::TcpListener>(
+            io_ctx_->get_io_context(), rule.local_port);
+        listeners_.push_back(std::move(listener));
+    }
+}
+
+void TunnelClient::on_tcp_connection_accepted(std::shared_ptr<core::TcpConnection> conn,
+                                               const ForwardRule& rule) {
+    if (!server_online_) {
+        util::Logger::warn("TCP connection accepted on port {} but server is offline, closing",
+                           rule.local_port);
+        conn->close();
+        return;
+    }
+
+    // Allocate a tunnel ID and create the tunnel
+    uint16_t tunnel_id = tunnel_mgr_->allocate_tunnel_id();
+    util::Logger::debug("New TCP connection on port {}, creating tunnel {} -> {}:{}",
+                        rule.local_port, tunnel_id, rule.remote_host, rule.remote_port);
+
+    auto tunnel = std::make_unique<tunnel::TunnelImpl>(
+        io_ctx_->get_io_context(), tunnel_id, server_friend_number_);
+
+    // Set the TCP connection on the tunnel
+    tunnel->set_tcp_connection(conn);
+
+    // Wire callback: when TunnelImpl wants to send data to Tox, serialize and
+    // send via the TunnelManager's send handler
+    tunnel->set_on_send_to_tox(
+        [this](std::span<const uint8_t> data) {
+            std::vector<uint8_t> frame_data(data.begin(), data.end());
+
+            // Prepend lossless packet prefix byte (0xA0)
+            std::vector<uint8_t> packet;
+            packet.reserve(1 + frame_data.size());
+            packet.push_back(0xA0);
+            packet.insert(packet.end(), frame_data.begin(), frame_data.end());
+
+            (void)tox_adapter_->send_lossless_packet(
+                server_friend_number_, packet.data(), packet.size());
+        });
+
+    // Wire callback: when data arrives from Tox for this tunnel, write to TCP
+    tunnel->set_on_data_for_tcp(
+        [conn](std::span<const uint8_t> data) {
+            conn->write(data.data(), data.size());
+        });
+
+    // Wire state change: when Connected (ACK received), start TCP read loop
+    tunnel->set_on_state_change(
+        [conn, tunnel_id](tunnel::Tunnel::State new_state) {
+            if (new_state == tunnel::Tunnel::State::Connected) {
+                util::Logger::debug("Tunnel {} connected, starting TCP read", tunnel_id);
+                conn->start_read();
+            } else if (new_state == tunnel::Tunnel::State::Closed ||
+                       new_state == tunnel::Tunnel::State::Error) {
+                util::Logger::debug("Tunnel {} state: {}", tunnel_id, to_string(new_state));
+                conn->close();
+            }
+        });
+
+    // Wire tunnel close callback
+    auto* tunnel_mgr_ptr = tunnel_mgr_.get();
+    tunnel->set_on_close(
+        [tunnel_mgr_ptr, tunnel_id]() {
+            util::Logger::debug("Tunnel {} on_close, removing from manager", tunnel_id);
+            tunnel_mgr_ptr->remove_tunnel(tunnel_id);
+        });
+
+    // Wire TCP data callback: forward received TCP data to tunnel
+    auto* tunnel_raw = tunnel.get();
+    conn->set_on_data(
+        [tunnel_raw](const uint8_t* data, std::size_t length) {
+            tunnel_raw->on_tcp_data_received(data, length);
+        });
+
+    // Wire TCP disconnect: close the tunnel
+    conn->set_on_disconnect(
+        [tunnel_raw](const std::error_code& /*ec*/) {
+            tunnel_raw->close();
+        });
+
+    // Initiate tunnel opening: sends TUNNEL_OPEN frame to server
+    bool opened = tunnel->open(rule.remote_host, rule.remote_port);
+    if (!opened) {
+        util::Logger::error("Failed to open tunnel {} to {}:{}",
+                            tunnel_id, rule.remote_host, rule.remote_port);
+        conn->close();
+        return;
+    }
+
+    // Add tunnel to manager (transfers ownership)
+    tunnel_mgr_->add_tunnel(tunnel_id, std::move(tunnel));
+
+    util::Logger::debug("Tunnel {} created and TUNNEL_OPEN sent to {}:{}",
+                        tunnel_id, rule.remote_host, rule.remote_port);
+}
+
+}  // namespace toxtunnel::app
