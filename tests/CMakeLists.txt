@@ -42,7 +42,9 @@ else()
         target_compile_options(unit_tests PRIVATE -Wno-array-bounds -Wno-stringop-overread)
     endif()
 endif()
-gtest_discover_tests(unit_tests)
+gtest_discover_tests(unit_tests
+    PROPERTIES LABELS "unit"
+)
 
 # Integration tests
 add_executable(integration_tests
@@ -72,4 +74,6 @@ else()
         target_compile_options(integration_tests PRIVATE -Wno-array-bounds -Wno-stringop-overread)
     endif()
 endif()
-gtest_discover_tests(integration_tests)
+gtest_discover_tests(integration_tests
+    PROPERTIES LABELS "integration"
+)

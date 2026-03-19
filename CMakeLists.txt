@@ -1,12 +1,24 @@
 cmake_minimum_required(VERSION 3.16)
 project(toxtunnel VERSION 1.0.0 LANGUAGES C CXX)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Export compile commands for IDEs
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(MSVC)
+    # c-toxcore unconditionally calls find_package(PkgConfig REQUIRED).
+    # GitHub-hosted Windows runners do not guarantee a pkg-config executable,
+    # so provide a tiny shim that lets pkg_search_module() fail cleanly and
+    # fall back to vcpkg-discovered CMake packages.
+    set(PKG_CONFIG_EXECUTABLE
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/fake-pkg-config.bat"
+        CACHE FILEPATH "Pkg-config shim for MSVC builds" FORCE)
+endif()
 
 # Options
 option(TOXTUNNEL_BUILD_TESTS "Build tests" ON)
@@ -150,4 +162,11 @@ if(TOXTUNNEL_BUILD_TESTS)
 endif()
 
 # Install
-install(TARGETS toxtunnel DESTINATION bin)
+install(TARGETS toxtunnel
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT toxtunnel-runtime
+)
+install(FILES README.md LICENSE
+    DESTINATION .
+    COMPONENT toxtunnel-runtime
+)
